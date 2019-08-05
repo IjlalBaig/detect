@@ -3,6 +3,28 @@ import torch
 from torch.nn import functional as F
 
 
+class Annealer(object):
+    def __init__(self, init, delta, steps):
+        self.init = init
+        self.delta = delta
+        self.steps = steps
+        self.s = 0
+        self.data = self.__repr__()
+        self.recent = init
+
+    def __repr__(self):
+        return {"init": self.init, "delta": self.delta, "steps": self.steps, "s": self.s}
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        self.s += 1
+        value = max(self.delta + (self.init - self.delta) * (1 - self.s / self.steps), self.delta)
+        self.recent = value
+        return value
+
+
 class Deconv2x2(nn.Module):
     def __init__(self, in_channels, out_channels, stride=1):
         super(Deconv2x2, self).__init__()
@@ -191,21 +213,18 @@ class TowerRepresentation(nn.Module):
         v = v.repeat(1, 1, self.r_dim // 16, self.r_dim // 16)
 
         # First skip-connected conv block
-        skip_in  = F.relu(self.conv1(x))
+        skip_in = F.relu(self.conv1(x))
         skip_out = F.relu(self.conv2(skip_in))
 
         x = F.relu(self.conv3(skip_in))
         x = F.relu(self.conv4(x)) + skip_out
-
         # Second skip-connected conv block (merged)
         skip_in = torch.cat([x, v], dim=1)
         skip_out = F.relu(self.conv5(skip_in))
 
         x = F.relu(self.conv6(skip_in))
         x = F.relu(self.conv7(x)) + skip_out
-
         r = F.relu(self.conv8(x))
-
         if self.pool:
             r = self.avgpool(r)
 

@@ -6,8 +6,10 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Subset, DataLoader
 from torchvision.utils import make_grid
+from torch.distributions import Normal
 
 from pytorch_msssim import SSIM, MS_SSIM
+from src.components import Annealer
 
 from tensorboardX import SummaryWriter
 
@@ -18,7 +20,7 @@ from ignite.utils import convert_tensor
 from ignite.metrics import RunningAverage, Loss
 
 
-from src.test_model import Net
+from src.test_model import Net, DetectNet
 from src.dataset import EnvironmentDataset
 from src.model_checkpoint import ModelCheckpoint
 
@@ -41,7 +43,8 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu)
                                                    batch_sizes=batch_sizes, num_workers=workers, im_dims=(128, 128))
 
     # create model and optimizer
-    model = Net()
+    model = Net(z_dim=7)
+
 
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     # ssim_loss = nn.MSELoss()
@@ -94,15 +97,16 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu)
             batch = engine.state.batch
             batch_size = batch.get("im").size(0)
             xform_idx_offset = random.randint(1, batch_size)
-            im, depth, pose_xform, masks = _prepare_batch(batch, xform_idx_offset,
+            im, depth, pose, pose_xform, masks = _prepare_batch(batch, xform_idx_offset,
                                                           device=device, non_blocking=False)
-            im_pred = model(im)
+            im_mu = model(im, pose)
+
 
             # send to cpu
             im = im.detach().cpu().float()
-            im_pred = im_pred.detach().cpu().float()
+            im_mu = im_mu.detach().cpu().float()
             writer.add_image("representation", make_grid(im), engine.state.epoch)
-            writer.add_image("reconstruction", make_grid(im_pred), engine.state.epoch)
+            writer.add_image("reconstruction", make_grid(im_mu), engine.state.epoch)
 
     @trainer_engine.on(Events.EPOCH_COMPLETED)
     def log_validation_metrics(engine):
@@ -204,6 +208,7 @@ def _prepare_batch(batch, xform_idx_offset=0, device=None, non_blocking=False):
     masks = batch.get("masks")
     return (convert_tensor(im, device=device, non_blocking=non_blocking),
             convert_tensor(depth, device=device, non_blocking=non_blocking),
+            convert_tensor(pose, device=device, non_blocking=non_blocking),
             convert_tensor(pose_xform, device=device, non_blocking=non_blocking),
             convert_tensor(masks, device=device, non_blocking=non_blocking))
 
@@ -219,18 +224,15 @@ def create_trainer_engine(model, optimizer, loss_fn, device=None, non_blocking=F
         optimizer.zero_grad()
         batch_size = batch.get("im").size(0)
         xform_idx_offset = random.randint(1, batch_size)
-        im, depth, pose_xform, masks = _prepare_batch(batch, xform_idx_offset,
-                                                      device=device, non_blocking=non_blocking)
-        im_pred = model(im)
-        loss_reconstruction = loss_fn(im_pred*255, im*255)
-        # todo: implement detect_loss
-        # loss_relative_pose
-        # loss_reprojection
+        im, depth, pose, pose_xform, masks = _prepare_batch(batch, xform_idx_offset,
+                                                            device=device, non_blocking=non_blocking)
 
-        loss = -loss_reconstruction
+        im_mu = model(im, pose)
+
+        loss = -loss_fn(im_mu*255, im*255)
         loss.backward()
         optimizer.step()
-        return {"loss": loss, "loss_recon": -loss_reconstruction,
+        return {"loss": loss, "loss_recon": loss,
                 "loss_relative_pose": 0.0, "loss_reprojection": 0.0}
 
     engine = Engine(_update)
@@ -253,16 +255,12 @@ def create_evaluator_engine(model, loss_fn, device=None, non_blocking=False):
         with torch.no_grad():
             batch_size = batch.get("im").size(0)
             xform_idx_offset = random.randint(1, batch_size)
-            im, depth, pose_xform, masks = _prepare_batch(batch, xform_idx_offset,
-                                                          device=device, non_blocking=non_blocking)
-            im_pred = model(im)
-            loss_reconstruction = loss_fn(im_pred*255, im*255)
-            # todo: implement detect_loss
-            # loss_relative_pose
-            # loss_reprojection
+            im, depth, pose, pose_xform, masks = _prepare_batch(batch, xform_idx_offset,
+                                                                device=device, non_blocking=non_blocking)
+            im_mu = model(im, pose)
 
-            loss = -loss_reconstruction
-            return {"loss": loss, "loss_recon": -loss_reconstruction,
+            loss = -loss_fn(im_mu*255, im*255)
+            return {"loss": loss, "loss_recon": loss,
                     "loss_relative_pose": 0.0, "loss_reprojection": 0.0}
 
     engine = Engine(_inference)
