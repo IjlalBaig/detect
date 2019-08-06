@@ -4,8 +4,10 @@ import random
 # Torch
 import torch
 import torch.nn as nn
+import math
 from torch.utils.data import Subset, DataLoader
 from torchvision.utils import make_grid
+import torch.nn.functional as F
 from torch.distributions import Normal
 
 from pytorch_msssim import SSIM, MS_SSIM
@@ -45,13 +47,16 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu)
     # create model and optimizer
     model = Net(z_dim=7)
 
-
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     # ssim_loss = nn.MSELoss()
     ssim_loss = SSIM(win_size=11, win_sigma=1.5, data_range=255, size_average=True, channel=1)
 
+    # Rate annealing schemes
+    sigma_scheme = Annealer(2.0, 0.7, 80000)
+    mu_scheme = Annealer(5 * 10 ** (-6), 5 * 10 ** (-6), 1.6 * 10 ** 5)
+
     # create engines
-    trainer_engine = create_trainer_engine(model, optimizer, loss_fn=ssim_loss, device=device)
+    trainer_engine = create_trainer_engine(model, optimizer, mu_scheme, sigma_scheme, loss_fn=ssim_loss, device=device)
     evaluator_engine = create_evaluator_engine(model, loss_fn=ssim_loss, device=device)
 
     # init checkpoint handler
@@ -99,7 +104,7 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu)
             xform_idx_offset = random.randint(1, batch_size)
             im, depth, pose, pose_xform, masks = _prepare_batch(batch, xform_idx_offset,
                                                           device=device, non_blocking=False)
-            im_mu = model(im, pose)
+            im_mu, _, _ = model(im, pose)
 
 
             # send to cpu
@@ -213,7 +218,7 @@ def _prepare_batch(batch, xform_idx_offset=0, device=None, non_blocking=False):
             convert_tensor(masks, device=device, non_blocking=non_blocking))
 
 
-def create_trainer_engine(model, optimizer, loss_fn, device=None, non_blocking=False):
+def create_trainer_engine(model, optimizer, mu_scheme, sigma_scheme, loss_fn, device=None, non_blocking=False):
 
     if device:
         model.to(device)
@@ -226,13 +231,30 @@ def create_trainer_engine(model, optimizer, loss_fn, device=None, non_blocking=F
         xform_idx_offset = random.randint(1, batch_size)
         im, depth, pose, pose_xform, masks = _prepare_batch(batch, xform_idx_offset,
                                                             device=device, non_blocking=non_blocking)
-
-        im_mu = model(im, pose)
-
-        loss = -loss_fn(im_mu*255, im*255)
-        loss.backward()
+        for name, param in model.named_parameters():
+            if "fc" in name:
+                param.requires_grad = False
+            else:
+                param.requires_grad = True
+        im_mu, p, p_recon = model(im, pose)
+        loss_r = F.mse_loss(im_mu, im)
+        loss_r.backward()
         optimizer.step()
-        return {"loss": loss, "loss_recon": loss,
+
+        for name, param in model.named_parameters():
+            if "conv" in name:
+                param.requires_grad = False
+            else:
+                param.requires_grad = True
+        im_mu, p, p_recon = model(im, pose)
+        loss_p = F.mse_loss(p_recon, p)
+        loss_p.backward()
+        optimizer.step()
+
+
+
+
+        return {"loss": loss_r, "loss_recon": loss_p,
                 "loss_relative_pose": 0.0, "loss_reprojection": 0.0}
 
     engine = Engine(_update)
@@ -257,10 +279,11 @@ def create_evaluator_engine(model, loss_fn, device=None, non_blocking=False):
             xform_idx_offset = random.randint(1, batch_size)
             im, depth, pose, pose_xform, masks = _prepare_batch(batch, xform_idx_offset,
                                                                 device=device, non_blocking=non_blocking)
-            im_mu = model(im, pose)
+            im_mu, p, p_recon = model(im, pose)
+            loss_p = F.mse_loss(p_recon, p)
 
             loss = -loss_fn(im_mu*255, im*255)
-            return {"loss": loss, "loss_recon": loss,
+            return {"loss": loss, "loss_recon": loss_p,
                     "loss_relative_pose": 0.0, "loss_reprojection": 0.0}
 
     engine = Engine(_inference)
