@@ -22,7 +22,7 @@ from ignite.utils import convert_tensor
 from ignite.metrics import RunningAverage, Loss
 
 
-from src.test_model import Net, DetectNet
+from src.test_model import Net, DetectNet, Net2, AE, VAE
 from src.dataset import EnvironmentDataset
 from src.model_checkpoint import ModelCheckpoint
 
@@ -45,22 +45,21 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu)
                                                    batch_sizes=batch_sizes, num_workers=workers, im_dims=(128, 128))
 
     # create model and optimizer
-    model = Net(z_dim=7)
+    model_ae = AE()
+    model_vae = VAE(z_dim=7)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    optimizer_ae = torch.optim.Adam(model_ae.parameters(), lr=0.001)
+    optimizer_vae = torch.optim.Adam(model_vae.parameters(), lr=0.001)
     # ssim_loss = nn.MSELoss()
     ssim_loss = SSIM(win_size=11, win_sigma=1.5, data_range=255, size_average=True, channel=1)
 
-    # Rate annealing schemes
-    sigma_scheme = Annealer(2.0, 0.7, 80000)
-    mu_scheme = Annealer(5 * 10 ** (-6), 5 * 10 ** (-6), 1.6 * 10 ** 5)
-
     # create engines
-    trainer_engine = create_trainer_engine(model, optimizer, mu_scheme, sigma_scheme, loss_fn=ssim_loss, device=device)
-    evaluator_engine = create_evaluator_engine(model, loss_fn=ssim_loss, device=device)
+    trainer_engine = create_trainer_engine(model_ae, model_vae, optimizer_ae, optimizer_vae,
+                                           loss_fn=ssim_loss, device=device)
+    evaluator_engine = create_evaluator_engine(model_ae, model_vae, loss_fn=ssim_loss, device=device)
 
     # init checkpoint handler
-    model_name = model.__class__.__name__
+    model_name = model_vae.__class__.__name__
     checkpoint_handler = ModelCheckpoint(dpath=log_dir, filename_prefix=model_name, n_saved=3)
 
     # init summary writer
@@ -74,50 +73,57 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu)
 
     # tensorboard --logdir=log --host=127.0.0.1
 
-    @trainer_engine.on(Events.STARTED)
-    def load_latest_checkpoint(engine):
-        checkpoint_dict = checkpoint_handler.load_checkpoint()
-        if checkpoint_dict:
-            model.load_state_dict(checkpoint_dict.get("model"))
-            model.eval()
-            engine.state.epoch = checkpoint_dict.get("epoch")
-            engine.state.iteration = checkpoint_dict.get("iteration")
+    # @trainer_engine.on(Events.STARTED)
+    # def load_latest_checkpoint(engine):
+    #     checkpoint_dict = checkpoint_handler.load_checkpoint()
+    #     if checkpoint_dict:
+    #         model.load_state_dict(checkpoint_dict.get("model"))
+    #         model.eval()
+    #         engine.state.epoch = checkpoint_dict.get("epoch")
+    #         engine.state.iteration = checkpoint_dict.get("iteration")
 
     @trainer_engine.on(Events.ITERATION_COMPLETED)
     def log_training_metrics(engine):
         for key, value in engine.state.metrics.items():
             writer.add_scalar("training/{}".format(key), value, engine.state.iteration)
 
-    @trainer_engine.on(Events.EPOCH_COMPLETED)
-    def log_checkpoint(engine):
-        checkpoint_dict = {"model": model.state_dict(), "optimizer": optimizer.state_dict(),
-                           "epoch": engine.state.epoch, "iteration": engine.state.iteration}
-        checkpoint_handler.save_checkpoint(checkpoint_dict)
+    # @trainer_engine.on(Events.EPOCH_COMPLETED)
+    # def log_checkpoint(engine):
+    #     checkpoint_dict = {"model": model_.state_dict(), "optimizer": optimizer.state_dict(),
+    #                        "epoch": engine.state.epoch, "iteration": engine.state.iteration}
+    #     checkpoint_handler.save_checkpoint(checkpoint_dict)
 
     @trainer_engine.on(Events.EPOCH_COMPLETED)
     def log_training_images(engine):
         batch = engine.state.batch
-        model.eval()
+        model_ae.eval()
+        model_vae.eval()
+
+
         with torch.no_grad():
             batch = engine.state.batch
             batch_size = batch.get("im").size(0)
             xform_idx_offset = random.randint(1, batch_size)
             im, depth, pose, pose_xform, masks = _prepare_batch(batch, xform_idx_offset,
                                                           device=device, non_blocking=False)
-            im_mu, _, _ = model(im, pose)
 
+            im_mu, w = model_ae(im)
+            w_mu, z = model_vae(w)
+            im_mu_, w = model_ae(im, w_mu)
 
             # send to cpu
             im = im.detach().cpu().float()
             im_mu = im_mu.detach().cpu().float()
+            im_mu_ = im_mu_.detach().cpu().float()
             writer.add_image("representation", make_grid(im), engine.state.epoch)
             writer.add_image("reconstruction", make_grid(im_mu), engine.state.epoch)
+            writer.add_image("reconstruction_", make_grid(im_mu_), engine.state.epoch)
 
-    @trainer_engine.on(Events.EPOCH_COMPLETED)
-    def log_validation_metrics(engine):
-        evaluator_engine.run(val_loader)
-        for key, value in evaluator_engine.state.metrics.items():
-            writer.add_scalar("validation/{}".format(key), value, engine.state.epoch)
+    # @trainer_engine.on(Events.EPOCH_COMPLETED)
+    # def log_validation_metrics(engine):
+    #     evaluator_engine.run(val_loader)
+    #     for key, value in evaluator_engine.state.metrics.items():
+    #         writer.add_scalar("validation/{}".format(key), value, engine.state.epoch)
 
     @trainer_engine.on(Events.EXCEPTION_RAISED)
     def handle_exception(engine, e):
@@ -126,7 +132,7 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu)
         if isinstance(e, KeyboardInterrupt) and (engine.state.iteration > 1):
             import warnings
             warnings.warn('KeyboardInterrupt caught. Exiting gracefully.')
-            log_checkpoint(engine)
+            # log_checkpoint(engine)
         else:
             raise e
 
@@ -136,6 +142,7 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu)
 
 def test(batch_size=12, data_dir="data", fraction=1.0, workers=4, use_gpu=True):
     pass
+
 
 def get_data_loaders(dpath, fractions=(0.7, 0.2, 0.1), batch_sizes=(12, 12, 1),
                      im_dims=(64, 64), im_mode="L", num_workers=4):
@@ -218,41 +225,37 @@ def _prepare_batch(batch, xform_idx_offset=0, device=None, non_blocking=False):
             convert_tensor(masks, device=device, non_blocking=non_blocking))
 
 
-def create_trainer_engine(model, optimizer, mu_scheme, sigma_scheme, loss_fn, device=None, non_blocking=False):
+def create_trainer_engine(model_ae, model_vae, optimizer_ae, optimizer_vae, loss_fn, device=None, non_blocking=False):
 
     if device:
-        model.to(device)
+        model_ae.to(device)
+        model_vae.to(device)
+        ssim_loss = SSIM(win_size=11, win_sigma=1.5, data_range=255, size_average=True, channel=1)
 
     def _update(engine, batch):
 
-        model.train()
-        optimizer.zero_grad()
         batch_size = batch.get("im").size(0)
         xform_idx_offset = random.randint(1, batch_size)
         im, depth, pose, pose_xform, masks = _prepare_batch(batch, xform_idx_offset,
                                                             device=device, non_blocking=non_blocking)
-        for name, param in model.named_parameters():
-            if "fc" in name:
-                param.requires_grad = False
-            else:
-                param.requires_grad = True
-        im_mu, p, p_recon = model(im, pose)
-        loss_r = F.mse_loss(im_mu, im)
+
+        for param in model_ae.parameters():
+            param.requires_grad = True
+        optimizer_ae.zero_grad()
+        im_mu, w = model_ae(im)
+        # loss_r = F.mse_loss(im_mu, im)
+        loss_r = - loss_fn(im_mu*255, im*255)
         loss_r.backward()
-        optimizer.step()
-
-        for name, param in model.named_parameters():
-            if "conv" in name:
-                param.requires_grad = False
-            else:
-                param.requires_grad = True
-        im_mu, p, p_recon = model(im, pose)
-        loss_p = F.mse_loss(p_recon, p)
+        optimizer_ae.step()
+        for param in model_ae.parameters():
+            param.requires_grad = False
+        optimizer_vae.zero_grad()
+        w = w.detach()
+        w_mu, z = model_vae(w)
+        im_mu, w = model_ae(im, w_mu)
+        loss_p = - ssim_loss(im_mu*255, im*255)
         loss_p.backward()
-        optimizer.step()
-
-
-
+        optimizer_vae.step()
 
         return {"loss": loss_r, "loss_recon": loss_p,
                 "loss_relative_pose": 0.0, "loss_reprojection": 0.0}
@@ -268,22 +271,31 @@ def create_trainer_engine(model, optimizer, mu_scheme, sigma_scheme, loss_fn, de
     return engine
 
 
-def create_evaluator_engine(model, loss_fn, device=None, non_blocking=False):
+def create_evaluator_engine(model_ae, model_vae, loss_fn, device=None, non_blocking=False):
     if device:
-        model.to(device)
+        model_ae.to(device)
+        model_vae.to(device)
 
     def _inference(engine, batch):
-        model.eval()
+        model_ae.eval()
+        model_vae.eval()
         with torch.no_grad():
             batch_size = batch.get("im").size(0)
             xform_idx_offset = random.randint(1, batch_size)
             im, depth, pose, pose_xform, masks = _prepare_batch(batch, xform_idx_offset,
                                                                 device=device, non_blocking=non_blocking)
-            im_mu, p, p_recon = model(im, pose)
-            loss_p = F.mse_loss(p_recon, p)
 
-            loss = -loss_fn(im_mu*255, im*255)
-            return {"loss": loss, "loss_recon": loss_p,
+            model_ae.eval()
+            model_vae.eval()
+
+            im_mu, w = model_ae(im)
+            loss_r = F.mse_loss(im_mu, im)
+            # loss_r = - loss_fn(im_mu * 255, im * 255)
+            w = w.detach()
+            w_mu, z = model_vae(w)
+            loss_p = F.mse_loss(w_mu, w)
+
+            return {"loss": loss_r, "loss_recon": loss_p,
                     "loss_relative_pose": 0.0, "loss_reprojection": 0.0}
 
     engine = Engine(_inference)
