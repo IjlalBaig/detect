@@ -1,6 +1,7 @@
 import torch.nn as nn
 import torch
 import torch.nn.functional as F
+from torch.autograd import Variable
 from torch.distributions import Normal, kl_divergence
 from src.components import Deconv2x2, Deconv3x3, ResidualBlockDown, ResidualBlockUp, ResidualBlock, ResidualFC, TowerRepresentation
 
@@ -70,53 +71,86 @@ class VAE(nn.Module):
 
 
 class Net(nn.Module):
-    def __init__(self, z_dim):
+    def __init__(self, z_dim, n_channels=1):
         super(Net, self).__init__()
 
+        self.context_gen = TowerRepresentation(n_channels=1, pool=False)
+        self.context = None
+
         # '''-------------------------------------------------------------''' #
-        self.conv1 = nn.Conv2d(1, 128, kernel_size=2, stride=2)     # 64
+        self.conv1 = nn.Conv2d(n_channels, 128, kernel_size=2, stride=2)     # 64
         self.conv2 = nn.Conv2d(128, 128, kernel_size=2, stride=2)   # 32
         self.conv3 = nn.Conv2d(128, 128, kernel_size=2, stride=2)   # 16
         self.conv4 = nn.Conv2d(128, 128, kernel_size=2, stride=2)   # 8
         self.conv5 = nn.Conv2d(128, 128, kernel_size=2, stride=2)    # 4
         # '''-------------------------------------------------------------''' #
-        # self.fce7 = nn.Linear(2048, 2048)
-        self.fce8 = nn.Linear(2048, z_dim)
+        self.fce1 = ResidualFC(2048)
+        self.fce2 = ResidualFC(2048)
+        self.fce3 = ResidualFC(2048)
+        self.fce4 = nn.Linear(2048, z_dim*2)
 
-        self.fcd8 = nn.Linear(z_dim, 2048)
-        # self.fcd7 = nn.Linear(2048, 2048)
+        self.fcd4 = nn.Linear(z_dim, 2048)
+        self.fcd3 = ResidualFC(2048)
+        self.fcd2 = ResidualFC(2048)
+        self.fcd1 = ResidualFC(2048)
 
         # '''-------------------------------------------------------------''' #
         self.deconv5 = Deconv3x3(128, 128, 2)
         self.deconv4 = Deconv3x3(128, 128, 2)
         self.deconv3 = Deconv3x3(128, 128, 2)
-        self.deconv2 = Deconv3x3(128, 128, 2)
-        self.deconv1 = Deconv3x3(128, 1, 2)
+        self.deconv2 = Deconv3x3(128+256, 128, 2)
+        self.deconv1 = Deconv3x3(128, n_channels * 1, 2)
         # '''-------------------------------------------------------------''' #
 
-    def forward(self, x, p, z_ext=None):
+    def reparameterize(self, mu, log_var):
+        # if self.training:
+        # multiply log variance with 0.5, then in-place exponent
+        # yielding the standard deviation
+        std = log_var.mul(0.5).exp_()  # type: Variable
+        eps = Variable(std.data.new(std.size()).normal_())
+        return eps.mul(std).add_(mu)
+        # else:
+            # return mu
+
+    def forward(self, x, p):
+        c = self.context_gen(x, p)
+        if self.context is not None:
+            c = torch.add(c, self.context)/2.0
+        self.context = c.detach()
+        c = c.repeat([x.size(0), 1, 1, 1])
+
         x = F.relu(self.conv1(x))
         x = F.relu(self.conv2(x))
         x = F.relu(self.conv3(x))
         x = F.relu(self.conv4(x))
-        z1 = F.relu(self.conv5(x))
-        # x_shape = x.shape
-        # x = x.view(-1, x.size(1)*x.size(2)*x.size(3))
-        # p = x
-        # x = F.relu(self.fce7(x))
-        # x = F.relu(self.fce8(x))
-        # x = F.relu(self.fcd8(x))
-        # x = F.relu(self.fcd7(x))
-        # p_recon = x
-        # x = x.view(x_shape)
-        if z_ext is not None:
-            z1 = z_ext
-        x = F.relu(self.deconv5(z1))
+        x = F.relu(self.conv5(x))
+        x_shape = x.shape
+        x = x.view(-1, x.size(1) * x.size(2) * x.size(3))
+
+        x = F.relu(self.fce1(x))
+        x = F.relu(self.fce2(x))
+        x = F.relu(self.fce3(x))
+        x = F.relu(self.fce4(x))
+
+        mu, log_var = torch.chunk(x, 2, dim=1)
+        z = self.reparameterize(mu=mu, log_var=log_var)
+
+        x = F.relu(self.fcd4(z))
+        x = F.relu(self.fcd3(x))
+        x = F.relu(self.fcd2(x))
+        x = F.relu(self.fcd1(x))
+        x = x.view(x_shape)
+        # print(w.shape)
+        x = F.relu(self.deconv5(x))
         x = F.relu(self.deconv4(x))
         x = F.relu(self.deconv3(x))
-        x = F.relu(self.deconv2(x))
+        x = F.relu(self.deconv2(torch.cat([x, c], dim=1)))
         x = F.relu(self.deconv1(x))
-        return x, z1
+
+        # x_mu, x_log_var = torch.chunk(x, 2, dim=1)
+        # x = self.reparameterize(x_mu, x_log_var)
+
+        return x, mu, log_var
 
 
 class Net2(nn.Module):

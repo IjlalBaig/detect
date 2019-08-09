@@ -1,6 +1,25 @@
 import torch.nn as nn
 import torch
 from torch.nn import functional as F
+from torchvision.models import vgg13, resnet18
+
+class FeatureLoss(nn.Module):
+    def __init__(self, device):
+        super(FeatureLoss, self).__init__()
+        model = vgg13(pretrained=True)
+        self.feature_model = nn.Sequential(*(list(model.children())[:-2]))
+        for p in self.feature_model.parameters():
+            p.requires_grad = False
+
+        self.feature_model.to(device)
+        self.loss_ftn = nn.MSELoss()
+
+    def forward(self, input, target):
+        input_features = self.feature_model(input)
+        target_features = self.feature_model(target)
+
+        return self.loss_ftn(input_features, target_features)
+
 
 
 class Annealer(object):
@@ -210,7 +229,7 @@ class TowerRepresentation(nn.Module):
         """
         # Increase dimensions
         v = v.view(v.size(0), -1, 1, 1)
-        v = v.repeat(1, 1, self.r_dim // 16, self.r_dim // 16)
+        v = v.repeat(1, 1, self.r_dim // 8, self.r_dim // 8)
 
         # First skip-connected conv block
         skip_in = F.relu(self.conv1(x))
@@ -227,6 +246,6 @@ class TowerRepresentation(nn.Module):
         r = F.relu(self.conv8(x))
         if self.pool:
             r = self.avgpool(r)
-
+        r = r.sum(dim=0, keepdim=True)
         return r
 
