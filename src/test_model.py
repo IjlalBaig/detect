@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 from torch.distributions import Normal, kl_divergence
 from src.components import Deconv2x2, Deconv3x3, ResidualBlockDown, ResidualBlockUp, ResidualBlock, ResidualFC, TowerRepresentation
+from pytorch_msssim import SSIM, MS_SSIM
 
 
 class AE(nn.Module):
@@ -74,8 +75,9 @@ class Net(nn.Module):
     def __init__(self, z_dim, n_channels=1):
         super(Net, self).__init__()
 
-        self.context_gen = TowerRepresentation(n_channels=1, pool=False)
-        self.context = None
+        # self.context_gen = TowerRepresentation(n_channels=1, pool=False)
+        # self.context = None
+        self.z_dim = z_dim
 
         # '''-------------------------------------------------------------''' #
         self.conv1 = nn.Conv2d(n_channels, 128, kernel_size=2, stride=2)     # 64
@@ -87,7 +89,7 @@ class Net(nn.Module):
         self.fce1 = ResidualFC(2048)
         self.fce2 = ResidualFC(2048)
         self.fce3 = ResidualFC(2048)
-        self.fce4 = nn.Linear(2048, z_dim*2)
+        self.fce4 = nn.Linear(2048, z_dim + z_dim * z_dim)
 
         self.fcd4 = nn.Linear(z_dim, 2048)
         self.fcd3 = ResidualFC(2048)
@@ -98,26 +100,30 @@ class Net(nn.Module):
         self.deconv5 = Deconv3x3(128, 128, 2)
         self.deconv4 = Deconv3x3(128, 128, 2)
         self.deconv3 = Deconv3x3(128, 128, 2)
-        self.deconv2 = Deconv3x3(128+256, 128, 2)
+        self.deconv2 = Deconv3x3(128, 128, 2)
         self.deconv1 = Deconv3x3(128, n_channels * 1, 2)
         # '''-------------------------------------------------------------''' #
 
-    def reparameterize(self, mu, log_var):
+    def reparameterize(self, mu, std):
         # if self.training:
         # multiply log variance with 0.5, then in-place exponent
         # yielding the standard deviation
-        std = log_var.mul(0.5).exp_()  # type: Variable
-        eps = Variable(std.data.new(std.size()).normal_())
-        return eps.mul(std).add_(mu)
+        # std = log_var.mul(0.5).exp_()  # type: # Variable
+        L = std.view(-1, mu.size(1), mu.size(1)).tril()
+        eps = torch.randn_like(mu).unsqueeze(dim=-1)
+        z = mu + L.matmul(eps).squeeze()
+
+        log_var = L.diagonal(dim1=2)
+        return z, log_var
         # else:
             # return mu
 
     def forward(self, x, p):
-        c = self.context_gen(x, p)
-        if self.context is not None:
-            c = torch.add(c, self.context)/2.0
-        self.context = c.detach()
-        c = c.repeat([x.size(0), 1, 1, 1])
+        # c = self.context_gen(x, p)
+        # if self.context is not None:
+        #     c = torch.add(c, self.context)/2.0
+        # self.context = c.detach()
+        # c = c.repeat([x.size(0), 1, 1, 1])
 
         x = F.relu(self.conv1(x))
         x = F.relu(self.conv2(x))
@@ -132,19 +138,19 @@ class Net(nn.Module):
         x = F.relu(self.fce3(x))
         x = F.relu(self.fce4(x))
 
-        mu, log_var = torch.chunk(x, 2, dim=1)
-        z = self.reparameterize(mu=mu, log_var=log_var)
-
+        mu, std = x[:, :self.z_dim], x[:, self.z_dim:]
+        z, log_var = self.reparameterize(mu=mu, std=std)
         x = F.relu(self.fcd4(z))
         x = F.relu(self.fcd3(x))
         x = F.relu(self.fcd2(x))
         x = F.relu(self.fcd1(x))
+
         x = x.view(x_shape)
         # print(w.shape)
         x = F.relu(self.deconv5(x))
         x = F.relu(self.deconv4(x))
         x = F.relu(self.deconv3(x))
-        x = F.relu(self.deconv2(torch.cat([x, c], dim=1)))
+        x = F.relu(self.deconv2(x))
         x = F.relu(self.deconv1(x))
 
         # x_mu, x_log_var = torch.chunk(x, 2, dim=1)

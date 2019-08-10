@@ -48,7 +48,7 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu)
     # create model and optimizer
     model = Net(z_dim=7, n_channels=1)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.000005)
     # ssim_loss = nn.MSELoss()
     ssim_loss = SSIM(win_size=11, win_sigma=1.5, data_range=255, size_average=True, channel=1)
     # ssim_loss = FeatureLoss(device)
@@ -72,14 +72,14 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu)
 
     # tensorboard --logdir=log --host=127.0.0.1
 
-    # @trainer_engine.on(Events.STARTED)
-    # def load_latest_checkpoint(engine):
-    #     checkpoint_dict = checkpoint_handler.load_checkpoint()
-    #     if checkpoint_dict:
-    #         model.load_state_dict(checkpoint_dict.get("model"))
-    #         model.eval()
-    #         engine.state.epoch = checkpoint_dict.get("epoch")
-    #         engine.state.iteration = checkpoint_dict.get("iteration")
+    @trainer_engine.on(Events.STARTED)
+    def load_latest_checkpoint(engine):
+        checkpoint_dict = checkpoint_handler.load_checkpoint()
+        if checkpoint_dict:
+            model.load_state_dict(checkpoint_dict.get("model"))
+            model.eval()
+            engine.state.epoch = checkpoint_dict.get("epoch")
+            engine.state.iteration = checkpoint_dict.get("iteration")
 
     @trainer_engine.on(Events.ITERATION_COMPLETED)
     def log_training_metrics(engine):
