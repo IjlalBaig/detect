@@ -155,7 +155,7 @@ def normalize_quaternion(quaternion: torch.Tensor,
         raise ValueError(
             "Input must be a tensor of shape (*, 4). Got {}".format(
                 quaternion.shape))
-    return _restrict_hemisphere(F.normalize(quaternion, p=2, dim=-1, eps=eps))
+    return quaternion
 
 
 def quaternion_to_rotation_matrix(quaternion: torch.Tensor) -> torch.Tensor:
@@ -183,8 +183,6 @@ def quaternion_to_rotation_matrix(quaternion: torch.Tensor) -> torch.Tensor:
                 quaternion.shape))
     # normalize the input quaternion
     quaternion_norm: torch.Tensor = normalize_quaternion(quaternion)
-
-    quaternion_norm = _restrict_hemisphere(quaternion_norm)
 
     # unpack the normalized quaternion components
     x, y, z, w = torch.chunk(quaternion_norm, chunks=4, dim=-1)

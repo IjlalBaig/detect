@@ -48,7 +48,7 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu)
     # create model and optimizer
     model = Net(z_dim=7, n_channels=1)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.000005)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.00001)
     # ssim_loss = nn.MSELoss()
     ssim_loss = SSIM(win_size=11, win_sigma=1.5, data_range=255, size_average=True, channel=1)
     # ssim_loss = FeatureLoss(device)
@@ -111,11 +111,11 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu)
             writer.add_image("representation", make_grid(im), engine.state.epoch)
             writer.add_image("reconstruction", make_grid(im_mu), engine.state.epoch)
 
-    # @trainer_engine.on(Events.EPOCH_COMPLETED)
-    # def log_validation_metrics(engine):
-    #     evaluator_engine.run(val_loader)
-    #     for key, value in evaluator_engine.state.metrics.items():
-    #         writer.add_scalar("validation/{}".format(key), value, engine.state.epoch)
+    @trainer_engine.on(Events.EPOCH_COMPLETED)
+    def log_validation_metrics(engine):
+        evaluator_engine.run(val_loader)
+        for key, value in evaluator_engine.state.metrics.items():
+            writer.add_scalar("validation/{}".format(key), value, engine.state.epoch)
 
     @trainer_engine.on(Events.EXCEPTION_RAISED)
     def handle_exception(engine, e):
@@ -232,8 +232,9 @@ def create_trainer_engine(model, optimizer, loss_fn, device=None, non_blocking=F
         optimizer.zero_grad()
         im_mu, mu, log_var = model(im, pose)
         loss_r = torch.exp(- loss_fn(im_mu*255, im*255))
-        kld = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp())
-        kld /= im.size(0) * im.size(1) * im.size(2) * im.size(3)
+        # kld = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp())
+        # kld /= im.size(0) * im.size(1) * im.size(2) * im.size(3)
+        kld = 0
         loss = loss_r
         loss.backward()
         optimizer.step()

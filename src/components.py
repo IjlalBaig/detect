@@ -217,9 +217,9 @@ class TowerRepresentation(nn.Module):
         self.conv7 = nn.Conv2d(k//2, k, kernel_size=3, stride=1, padding=1)
         self.conv8 = nn.Conv2d(k, k, kernel_size=1, stride=1)
 
-        self.avgpool = nn.AvgPool2d(k//16)
+        self.avgpool = nn.AvgPool2d(k//8)
 
-    def forward(self, x, v):
+    def forward(self, x, v, repeat):
         """
         Send an (image, viewpoint) pair into the
         network to generate a representation
@@ -246,6 +246,9 @@ class TowerRepresentation(nn.Module):
         r = F.relu(self.conv8(x))
         if self.pool:
             r = self.avgpool(r)
+        r = r.squeeze()
         r = r.sum(dim=0, keepdim=True)
+        r = r.repeat([repeat, 1])
+
         return r
 
