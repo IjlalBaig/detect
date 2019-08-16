@@ -191,17 +191,7 @@ class Net(nn.Module):
     #     return torch.cat([x_pos, y_pos, z_pos], dim=1).permute(0, 2, 3, 1).view(b, c, h, w, 3, 1)
     #
     # @staticmethod
-    # def apply_point_transform(transform, point):
-    #     b, c, h, w, *_ = point.size()
-    #     pos, q = transform.split([3, 4], dim=1)
-    #     pos_vec = pos.view(-1, 3, 1)
-    #     rot_mat = geo.quaternion_to_rotation_matrix(q)
-    #
-    #     # duplicate transformation matrices to point_map dimensions
-    #     pos_vec = pos_vec.unsqueeze(1).unsqueeze(1).unsqueeze(1).repeat(1, c, h, w, 1, 1)
-    #     rot_mat = rot_mat.unsqueeze(1).unsqueeze(1).unsqueeze(1).repeat(1, c, h, w, 1, 1)
-    #
-    #     return rot_mat.matmul(point) + pos_vec
+
     #
     # @staticmethod
     # def point_2_pixel(point, scaling_factor, focal_length=0.05):
@@ -261,22 +251,64 @@ def img_from_pixel(img, pixel_coord):
     v = pixel_coord[..., 1, 0]
     # d = pixel_coord[..., 2, 0]
 
-    # idxs = torch.where((u > 0) & (u < w) & (v > 0) & (v < h), (u + v * w), torch.tensor([-1.], device=dev)).long()
-    idxs = (u + v * w).long()
-    idxs_unfolded = (idxs + torch.arange(0, b, device=dev).unsqueeze(-1)).view(-1)
+    idxs = (u + v * w).where((u > 0) & (u < w) & (v > 0) & (v < h), torch.tensor(-1, device=dev)).long()
+    # todo: set duplicate indices with lower d values to zero
+    # values, indices = torch.max(tensor, 0)
+    # torch.max(dim=-1)
+    # idxs = idxs.where(idxs, torch.tensor(-1, device=dev))
+    # offset idx by batch number
+    idxs_unfolded = (idxs + b * c * w * h * torch.arange(0, b, device=dev).unsqueeze(-1)).view(-1)
     img_unfolded = img.view(-1)
-    # out = torch.zeros_like(img_unfolded)
+    out = img_unfolded.where(idxs_unfolded >= 0, torch.tensor([0.], device=dev))
 
-    return img_unfolded[idxs_unfolded].view(b, c, h, w)
-
-
+    return out.view(b, c, h, w)
 
 
+def qtvec_to_transformation_matrix(pose):
+    """Converts a pose vector [x, y, z, q0, q1, q2, q3] to a transformation matrix.
+        The quaternion should be in (w, x, y, z) format.
+        Args:
+            pose (torch.Tensor): a tensor containing a translations and quaternion to be
+              converted. The tensor can be of shape :math:`(*, 7)`.
+        Return:
+            torch.Tensor: the transformation matrix of shape :math:`(*, 4, 4)`."""
+    b, _ = pose.shape
+    p, q = pose.split([3, 4], dim=1)
+    rot_matrix = quaternion_to_rotation_matrix(q)
+    zero_padding = torch.zeros(3).unsqueeze(0).repeat(b, 1, 1)
+    p_padded = torch.cat([p, torch.ones(1).unsqueeze(0).repeat(b, 1)], dim=1).view(b, 4, 1)
+    trans_matrix = torch.cat([torch.cat([rot_matrix, zero_padding], dim=1), p_padded], dim=-1)
+    return trans_matrix
 
 
+def apply_transform(points, trans):
+    """Apply pose transformation [x, y, z, q0, q1, q2, q3] to a cam_coordinates.
+        The quaternion should be in (w, x, y, z) format.
+        Args:
+            points (torch.Tensor): tensor of points of shape :math:`(B, N, D)`.
+            trans (torch.Tensor): tensor for transformations of shape :math:`(B, 7)`.
+        Return:
+            torch.Tensor: the transformation matrix of shape :math:`(*, 4, 4)`."""
+    trans_matrix = qtvec_to_transformation_matrix(trans)
+    points_transformed = kornia.transform_points(trans_matrix, points)
+    return points_transformed
 
-
-
+# img = Image.open("D:\\Thesis\\Implementation\\code\\data\\blender_data\\blender_session\\2019_Jul_20_07_28_29\\depth0017.png")
+# img_t = transforms.ToTensor()(img.convert("L"))
+# img_b = img_t.unsqueeze(0).repeat(2, 1, 1, 1)
+# intrinsics = (torch.tensor([[106.66, 0, 63.5], [0, 106.666, 63.5], [0, 0, 1]])).unsqueeze(0).repeat(2, 1, 1)
+# transform = torch.tensor([[0., 0., 0., 1, 0., 0, 0], [0, 0, 0, 0.403, 0.532, 0.736, -0.113]])
+# # todo: check
+# cam = pixel_2_cam(img_b.squeeze(1), intrinsics)
+#
+# cam_transformed = apply_transform(cam.squeeze(-1), transform)
+# # todo: check
+# pixel = cam_2_pixel(cam_transformed.unsqueeze(-1), intrinsics)
+# # todo: check
+# out = img_from_pixel(img_b, pixel)
+# out_1, out_2 = transforms.ToPILImage()(out[0]), transforms.ToPILImage()(out[1])
+# out_1.show()
+# out_2.show()
 
 class Net2(nn.Module):
     def __init__(self, z_dim):

@@ -185,7 +185,7 @@ def quaternion_to_rotation_matrix(quaternion: torch.Tensor) -> torch.Tensor:
     quaternion_norm: torch.Tensor = normalize_quaternion(quaternion)
 
     # unpack the normalized quaternion components
-    x, y, z, w = torch.chunk(quaternion_norm, chunks=4, dim=-1)
+    w, x, y, z = torch.chunk(quaternion_norm, chunks=4, dim=-1)
 
     # compute the actual conversion
     tx: torch.Tensor = 2.0 * x
