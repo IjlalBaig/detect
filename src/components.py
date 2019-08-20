@@ -2,6 +2,63 @@ import torch.nn as nn
 import torch
 from torch.nn import functional as F
 from torchvision.models import vgg13, resnet18
+import random
+import src.geometry as geo
+import kornia
+from math import pi
+from pytorch_msssim import SSIM
+
+class PoseTransformSampler(nn.Module):
+    """Samples a pose transformation.
+        Args:
+            variance (tuple): a tuple containing variance of dimensions (translation, angle).
+        Return:
+            torch.Tensor: the pose transform of shape :math:`(*, 7)`, representing translation (x, y, z) and
+            quaternion orientation (w, x, y, z) transform.
+        """
+    def __init__(self, device, variance=(0.1, 0.2)):
+        super(PoseTransformSampler, self).__init__()
+        self.device = device
+        self.transl_variance = variance[0]
+        self.orient_variance = variance[1]
+
+
+    def forward(self, b):
+        transl = (-2 * self.transl_variance) * torch.rand(b, 3, device=self.device) + self.transl_variance
+        orient_axis = torch.rand(b, 3, device=self.device)
+        axis_rotation = torch.ones(b, 1, device=self.device).uniform_(1.0 - self.orient_variance, 1.0)
+        orient = torch.cat([axis_rotation, orient_axis], dim=1)
+        quaternion = orient
+        quaternion[:, 1:] = orient[:, 1:] * (1. - orient[:, 0].unsqueeze(-1)**2).sqrt() *\
+                            (1 / orient[:, 1:].norm(dim=1).unsqueeze(-1))
+        return torch.cat([transl, quaternion], dim=1)
+
+
+class TransformationLoss(nn.Module):
+    def __init__(self):
+        super(TransformationLoss, self).__init__()
+
+    def forward(self, pose_cam, pose_ee):
+        b, _ = pose_ee.shape
+        xform_idx_offset = random.randint(1, b)
+        ee_xform = geo.get_pose_xfrm(pose_ee, pose_ee.roll(shifts=xform_idx_offset, dims=0))
+        cam_xform = geo.get_pose_xfrm(pose_cam, pose_cam.roll(shifts=xform_idx_offset, dims=0))
+        return F.mse_loss(cam_xform, ee_xform)
+
+
+class InductiveBiasLoss(nn.Module):
+    def __init__(self):
+        super(InductiveBiasLoss, self).__init__()
+        self.ssim_loss = SSIM(win_size=11, win_sigma=1.5, data_range=255, size_average=True, channel=1)
+
+    def forward(self, pose_xfrm, im_pred, im_xfrmd_pred, depth, intrinsics):
+        cam_coord = geo.pixel_2_cam(depth.squeeze(1), intrinsics)
+        cam_coord_xfrmd = geo.transform_points(cam_coord.squeeze(-1), pose_xfrm)
+        pixel_coord_xfrmd = geo.cam_2_pixel(cam_coord_xfrmd.unsqueeze(-1), intrinsics)
+        im_pred_geo = geo.img_from_pixel(im_pred, pixel_coord_xfrmd)
+        im_xfrmd_pred = im_xfrmd_pred.where(im_pred_geo > 0, torch.tensor([0.], device=im_pred_geo.device))
+        return torch.exp(- self.ssim_loss(im_xfrmd_pred*255, im_pred_geo*255)), im_pred_geo, im_xfrmd_pred
+
 
 class FeatureLoss(nn.Module):
     def __init__(self, device):
@@ -19,7 +76,6 @@ class FeatureLoss(nn.Module):
         target_features = self.feature_model(target)
 
         return self.loss_ftn(input_features, target_features)
-
 
 
 class Annealer(object):

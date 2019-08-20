@@ -89,10 +89,10 @@ def cam_to_pixel(points, intrinsics, img):
 #
 # out = cam_to_pixel(cam_, intrinsics, depth_b)
 
-out_1, out_2 = out
-transforms.ToPILImage()(out_1).show()
-transforms.ToPILImage()(out_2).show()
-depth.show()
+# out_1, out_2 = out
+# transforms.ToPILImage()(out_1).show()
+# transforms.ToPILImage()(out_2).show()
+# depth.show()
 
 
 

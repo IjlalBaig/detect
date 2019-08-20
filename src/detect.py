@@ -10,8 +10,7 @@ from torchvision.utils import make_grid
 import torch.nn.functional as F
 from torch.distributions import Normal
 
-from pytorch_msssim import SSIM, MS_SSIM
-from src.components import Annealer
+from pytorch_msssim import SSIM
 
 from tensorboardX import SummaryWriter
 
@@ -19,11 +18,11 @@ from tensorboardX import SummaryWriter
 from ignite.contrib.handlers import ProgressBar
 from ignite.engine import Engine, Events
 from ignite.utils import convert_tensor
-from ignite.metrics import RunningAverage, Loss
+from ignite.metrics import RunningAverage
 
 
-from src.test_model import Net, DetectNet, Net2, AE, VAE
-from src.components import FeatureLoss
+from src.test_model import Net
+from src.components import TransformationLoss, InductiveBiasLoss, PoseTransformSampler
 from src.dataset import EnvironmentDataset
 from src.model_checkpoint import ModelCheckpoint
 
@@ -43,19 +42,25 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu)
     device = "cuda" if torch.cuda.is_available() and use_gpu else "cpu"
 
     train_loader, val_loader, _ = get_data_loaders(dpath=data_dir, fractions=fractions, im_mode="L",
-                                                   batch_sizes=batch_sizes, num_workers=workers, im_dims=(128, 128))
+                                                   batch_sizes=batch_sizes, num_workers=workers, im_dims=(64, 64))
 
     # create model and optimizer
     model = Net(z_dim=7, n_channels=1)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.00001)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
     # ssim_loss = nn.MSELoss()
     ssim_loss = SSIM(win_size=11, win_sigma=1.5, data_range=255, size_average=True, channel=1)
+    pose_xfrm_loss = TransformationLoss()
+    ib_loss = InductiveBiasLoss()
     # ssim_loss = FeatureLoss(device)
 
+    pose_xfrm_sampler = PoseTransformSampler(device=device)
+
     # create engines
-    trainer_engine = create_trainer_engine(model, optimizer, loss_fn=ssim_loss, device=device)
-    evaluator_engine = create_evaluator_engine(model, loss_fn=ssim_loss, device=device)
+    trainer_engine = create_trainer_engine(model, optimizer, loss_recon=ssim_loss, loss_pose=pose_xfrm_loss,
+                                           loss_ib=ib_loss, xfrm_sampler=pose_xfrm_sampler, device=device)
+    evaluator_engine = create_evaluator_engine(model, loss_recon=ssim_loss, loss_pose=pose_xfrm_loss,
+                                               loss_ib=ib_loss, xfrm_sampler=pose_xfrm_sampler, device=device)
 
     # init checkpoint handler
     model_name = model.__class__.__name__
@@ -67,7 +72,7 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu)
 
     # define progress bar
     pbar = ProgressBar()
-    metric_names = ["cumulative_loss", "reconstruction_loss", "relative_pose_loss", "reprojection_loss"]
+    metric_names = ["cumulative_loss", "reconstruction_loss", "relative_pose_loss", "reprojection_loss", "kld"]
     pbar.attach(trainer_engine, metric_names=metric_names)
 
     # tensorboard --logdir=log --host=127.0.0.1
@@ -97,19 +102,21 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu)
         batch = engine.state.batch
         model.eval()
         with torch.no_grad():
-            batch = engine.state.batch
-            batch_size = batch.get("im").size(0)
-            xform_idx_offset = random.randint(1, batch_size)
-            im, depth, pose, pose_xform, masks = _prepare_batch(batch, xform_idx_offset,
-                                                          device=device, non_blocking=False)
+            im, depth, pose, masks, intrinsics = _prepare_batch(batch, device=device, non_blocking=True)
+            b, c, h, w = im.size()
+            pose_xfrm = pose_xfrm_sampler(b)
+            im_pred, im_xfrmd_pred, pose_pred, mu, log_var = model(im, pose, pose_xfrm)
 
-            im_mu, mu, log_var = model(im, pose)
+            _, im_pred_geo, im_xfrmd_pred = ib_loss(pose_xfrm, im_pred, im_xfrmd_pred, depth, intrinsics)
 
             # send to cpu
             im = im.detach().cpu().float()
-            im_mu = im_mu.detach().cpu().float()
-            writer.add_image("representation", make_grid(im), engine.state.epoch)
-            writer.add_image("reconstruction", make_grid(im_mu), engine.state.epoch)
+            im_pred = im_pred.detach().cpu().float()
+            im_xfrmd_pred = im_xfrmd_pred.detach().cpu().float()
+            writer.add_image("ground truth", make_grid(im), engine.state.epoch)
+            writer.add_image("reconstruction", make_grid(im_pred), engine.state.epoch)
+            writer.add_image("geometric transformed", make_grid(im_pred_geo), engine.state.epoch)
+            writer.add_image("model transformed", make_grid(im_xfrmd_pred), engine.state.epoch)
 
     @trainer_engine.on(Events.EPOCH_COMPLETED)
     def log_validation_metrics(engine):
@@ -162,85 +169,52 @@ def get_data_loaders(dpath, fractions=(0.7, 0.2, 0.1), batch_sizes=(12, 12, 1),
     return train_loader, val_loader, test_loader
 
 
-def qmul(q, r):
-    """
-    Multiply quaternion(s) q with quaternion(s) r.
-    Expects two equally-sized tensors of shape (*, 4), where * denotes any number of dimensions.
-    Returns q*r as a tensor of shape (*, 4).
-    """
-    assert q.shape[-1] == 4
-    assert r.shape[-1] == 4
-
-    original_shape = q.shape
-
-    # Compute outer product
-    terms = torch.bmm(r.view(-1, 4, 1), q.view(-1, 1, 4))
-
-    w = terms[:, 0, 0] - terms[:, 1, 1] - terms[:, 2, 2] - terms[:, 3, 3]
-    x = terms[:, 0, 1] + terms[:, 1, 0] - terms[:, 2, 3] + terms[:, 3, 2]
-    y = terms[:, 0, 2] + terms[:, 1, 3] + terms[:, 2, 0] - terms[:, 3, 1]
-    z = terms[:, 0, 3] - terms[:, 1, 2] + terms[:, 2, 1] + terms[:, 3, 0]
-    return torch.stack((w, x, y, z), dim=1).view(original_shape)
-
-
-def qinv(q):
-    assert q.shape[-1] == 4
-    q[:, 1:] *= -1
-    return q
-
-
-def _pose_xform(l, m):
-    assert l.shape[-1] == 7
-    assert m.shape[-1] == 7
-
-    l_pos, l_orient = l[:, :3], l[:, 3:]
-    m_pos, m_orient = m[:, :3], m[:, 3:]
-
-    t_pos = m_pos - l_pos
-    t_orient = qmul(m_orient, qinv(l_orient))
-    return torch.cat([t_pos, t_orient], dim=1)
-
-
-def _prepare_batch(batch, xform_idx_offset=0, device=None, non_blocking=False):
+def _prepare_batch(batch, device=None, non_blocking=False):
     """Prepare batch for training: pass to a device with options.
 
     """
     im = batch.get("im")
     depth = batch.get("depth")
     pose = batch.get("pose")
-    pose_xform = _pose_xform(pose, pose.roll(shifts=xform_idx_offset, dims=0))
     masks = batch.get("masks")
+    intrinsics = batch.get("intrinsics")
+
     return (convert_tensor(im, device=device, non_blocking=non_blocking),
             convert_tensor(depth, device=device, non_blocking=non_blocking),
             convert_tensor(pose, device=device, non_blocking=non_blocking),
-            convert_tensor(pose_xform, device=device, non_blocking=non_blocking),
-            convert_tensor(masks, device=device, non_blocking=non_blocking))
+            convert_tensor(masks, device=device, non_blocking=non_blocking),
+            convert_tensor(intrinsics, device=device, non_blocking=non_blocking))
 
 
-def create_trainer_engine(model, optimizer, loss_fn, device=None, non_blocking=False):
+def create_trainer_engine(model, optimizer, loss_recon, loss_pose, loss_ib, xfrm_sampler, device=None, non_blocking=False):
 
     if device:
         model.to(device)
 
     def _update(engine, batch):
 
-        batch_size = batch.get("im").size(0)
-        xform_idx_offset = random.randint(1, batch_size)
-        im, depth, pose, pose_xform, masks = _prepare_batch(batch, xform_idx_offset,
-                                                            device=device, non_blocking=non_blocking)
+        im, depth, pose, masks, intrinsics = _prepare_batch(batch, device=device, non_blocking=non_blocking)
+        b, c, h, w = im.size()
+        pose_xfrm = xfrm_sampler(b)
 
+        # todo: get random pose transform
+        # feed to mode
+        # get transformed image
         optimizer.zero_grad()
-        im_mu, mu, log_var = model(im, pose)
-        loss_r = torch.exp(- loss_fn(im_mu*255, im*255))
-        # kld = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp())
-        # kld /= im.size(0) * im.size(1) * im.size(2) * im.size(3)
-        kld = 0
-        loss = loss_r
+        im_pred, im_xfrmd_pred, pose_pred, mu, log_var = model(im, pose, pose_xfrm)
+
+        loss_r = torch.exp(- loss_recon(im_pred*255, im*255))
+        loss_p = loss_pose(pose_pred, pose)
+        loss_i, *_ = loss_ib(pose_xfrm, im_pred, im_xfrmd_pred, depth, intrinsics)
+
+        kld = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp())
+        kld /= im.size(0) * im.size(1) * im.size(2) * im.size(3)
+        loss = loss_r + kld + loss_i + loss_p
         loss.backward()
         optimizer.step()
 
         return {"loss": loss, "loss_recon": loss_r,
-                "loss_relative_pose": kld, "loss_reprojection": 0.0}
+                "loss_relative_pose": loss_p, "loss_reprojection": loss_i, "kld": kld}
 
     engine = Engine(_update)
 
@@ -249,11 +223,12 @@ def create_trainer_engine(model, optimizer, loss_fn, device=None, non_blocking=F
     RunningAverage(output_transform=lambda x: x["loss_recon"]).attach(engine, "reconstruction_loss")
     RunningAverage(output_transform=lambda x: x["loss_relative_pose"]).attach(engine, "relative_pose_loss")
     RunningAverage(output_transform=lambda x: x["loss_reprojection"]).attach(engine, "reprojection_loss")
+    RunningAverage(output_transform=lambda x: x["kld"]).attach(engine, "kld")
 
     return engine
 
 
-def create_evaluator_engine(model, loss_fn, device=None, non_blocking=False):
+def create_evaluator_engine(model, loss_recon, loss_pose, loss_ib, xfrm_sampler, device=None, non_blocking=False):
     if device:
         model.to(device)
 
@@ -261,15 +236,18 @@ def create_evaluator_engine(model, loss_fn, device=None, non_blocking=False):
         model.eval()
         with torch.no_grad():
             batch_size = batch.get("im").size(0)
-            xform_idx_offset = random.randint(1, batch_size)
-            im, depth, pose, pose_xform, masks = _prepare_batch(batch, xform_idx_offset,
-                                                                device=device, non_blocking=non_blocking)
+            im, depth, pose, masks, intrinsics = _prepare_batch(batch, device=device, non_blocking=non_blocking)
+            b, c, h, w = im.size()
+            pose_xfrm = xfrm_sampler(b)
 
-            im_mu, mu, log_var = model(im, pose)
-            loss_r = loss_fn(im_mu * 255, im * 255)
+            im_pred, im_xfrmd_pred, pose_pred, mu, log_var = model(im, pose, pose_xfrm)
 
-            return {"loss": loss_r, "loss_recon": loss_r,
-                    "loss_relative_pose": 0.0, "loss_reprojection": 0.0}
+            loss_r = torch.exp(- loss_recon(im_pred*255, im*255))
+            loss_p = loss_pose(pose_pred, pose)
+            loss_i, *_ = loss_ib(pose_xfrm, im_pred, im_xfrmd_pred, depth, intrinsics)
+            loss = loss_r + loss_p + loss_i
+            return {"loss": loss, "loss_recon": loss_r,
+                    "loss_relative_pose": loss_p, "loss_reprojection": loss_i}
 
     engine = Engine(_inference)
 

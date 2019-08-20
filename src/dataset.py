@@ -19,8 +19,7 @@ class EnvironmentDataset(Dataset):
         self._data_frames = []
         self._load_data()
 
-    @staticmethod
-    def _read_data_file(fpath):
+    def _read_data_file(self, fpath):
         data = utils.read_json(fpath)
         data_frames = []
         for sample in data:
@@ -37,8 +36,17 @@ class EnvironmentDataset(Dataset):
             for mask_id in sample.get("mask_ids", ""):
                 mask_paths.append(os.path.join(os.path.dirname(fpath), mask_id))
 
+            # intrinsics
+            f = 30
+            sx = sy = 36
+            cx = (self._im_size[0] - 1.0) / 2
+            cy = (self._im_size[1] - 1.0) / 2
+            fx = self._im_size[0] * f / sx
+            fy = self._im_size[1] * f / sy
+
             data_frame = {"im_path": im_path, "depth_path": depth_path,
-                          "mask_paths": mask_paths, "pose": pose}
+                          "mask_paths": mask_paths, "pose": pose,
+                          "intrinsics": [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]]}
 
             if data_frame:
                 data_frames.append(data_frame)
@@ -91,6 +99,9 @@ class EnvironmentDataset(Dataset):
 
         pose_xfrmed = torch.tensor(data_frame.get("pose"), dtype=torch.float)
 
+        intrinsics_xformed = torch.tensor(data_frame.get("intrinsics"), dtype=torch.float)
+
         sample = {"im": im_xfrmed, "depth": depth_xfrmed,
-                  "pose": pose_xfrmed, "masks": masks_xfrmed}
+                  "pose": pose_xfrmed, "masks": masks_xfrmed,
+                  "intrinsics": intrinsics_xformed}
         return sample

@@ -1,151 +1,17 @@
-from typing import Optional
-
 import torch
 import torch.nn.functional as F
 
-from kornia.geometry.linalg import transform_points
-from kornia.geometry.conversions import (
-    convert_points_to_homogeneous, convert_points_from_homogeneous
-)
-
-def project_points(
-        point_3d: torch.Tensor,
-        camera_matrix: torch.Tensor) -> torch.Tensor:
-    r"""Projects a 3d point onto the 2d camera plane.
-
-    Args:
-        point3d (torch.Tensor): tensor containing the 3d points to be projected
-            to the camera plane. The shape of the tensor can be :math:`(*, 3)`.
-        camera_matrix (torch.Tensor): tensor containing the intrinsics camera
-            matrix. The tensor shape must be Bx4x4.
-
-    Returns:
-        torch.Tensor: array of (u, v) cam coordinates with shape :math:`(*, 2)`.
-    """
-    if not torch.is_tensor(point_3d):
-        raise TypeError("Input point_3d type is not a torch.Tensor. Got {}"
-                        .format(type(point_3d)))
-    if not torch.is_tensor(camera_matrix):
-        raise TypeError("Input camera_matrix type is not a torch.Tensor. Got {}"
-                        .format(type(camera_matrix)))
-    if not (point_3d.device == camera_matrix.device):
-        raise ValueError("Input tensors must be all in the same device.")
-    if not point_3d.shape[-1] == 3:
-        raise ValueError("Input points_3d must be in the shape of (*, 3)."
-                         " Got {}".format(point_3d.shape))
-    if not camera_matrix.shape[-2:] == (3, 3):
-        raise ValueError(
-            "Input camera_matrix must be in the shape of (*, 3, 3).")
-    # projection eq. [u, v, w]' = K * [x y z 1]'
-    # u = fx * X / Z + cx
-    # v = fy * Y / Z + cy
-
-    # project back using depth dividing in a safe way
-    xy_coords: torch.Tensor = convert_points_from_homogeneous(point_3d)
-    x_coord: torch.Tensor = xy_coords[..., 0:1]
-    y_coord: torch.Tensor = xy_coords[..., 1:2]
-
-    # unpack intrinsics
-    fx: torch.Tensor = camera_matrix[..., 0:1, 0]
-    fy: torch.Tensor = camera_matrix[..., 1:2, 1]
-    cx: torch.Tensor = camera_matrix[..., 0:1, 2]
-    cy: torch.Tensor = camera_matrix[..., 1:2, 2]
-
-    # apply intrinsics ans return
-    u_coord: torch.Tensor = x_coord * fx + cx
-    v_coord: torch.Tensor = y_coord * fy + cy
-
-    return torch.cat([u_coord, v_coord], dim=-1)
+import kornia
 
 
-def unproject_points(
-        point_2d: torch.Tensor,
-        depth: torch.Tensor,
-        camera_matrix: torch.Tensor,
-        normalize: Optional[bool] = False) -> torch.Tensor:
-    r"""Unprojects a 2d point in 3d.
-
-    Transform coordinates in the pixel frame to the camera frame.
-
-    Args:
-        point2d (torch.Tensor): tensor containing the 2d to be projected to
-            world coordinates. The shape of the tensor can be :math:`(*, 2)`.
-        depth (torch.Tensor): tensor containing the depth value of each 2d
-            points. The tensor shape must be equal to point2d :math:`(*, 1)`.
-        camera_matrix (torch.Tensor): tensor containing the intrinsics camera
-            matrix. The tensor shape must be Bx4x4.
-        normalize (Optional[bool]): wether to normalize the pointcloud. This
-            must be set to `True` when the depth is represented as the Euclidean
-            ray length from the camera position. Default is `False`.
-
-    Returns:
-        torch.Tensor: tensor of (x, y, z) world coordinates with shape
-        :math:`(*, 3)`.
-    """
-    if not torch.is_tensor(point_2d):
-        raise TypeError("Input point_2d type is not a torch.Tensor. Got {}"
-                        .format(type(point_2d)))
-    if not torch.is_tensor(depth):
-        raise TypeError("Input depth type is not a torch.Tensor. Got {}"
-                        .format(type(depth)))
-    if not torch.is_tensor(camera_matrix):
-        raise TypeError("Input camera_matrix type is not a torch.Tensor. Got {}"
-                        .format(type(camera_matrix)))
-    if not (point_2d.device == depth.device == camera_matrix.device):
-        raise ValueError("Input tensors must be all in the same device.")
-    if not point_2d.shape[-1] == 2:
-        raise ValueError("Input points_2d must be in the shape of (*, 2)."
-                         " Got {}".format(point_2d.shape))
-    if not depth.shape[-1] == 1:
-        raise ValueError("Input depth must be in the shape of (*, 1)."
-                         " Got {}".format(depth.shape))
-    if not camera_matrix.shape[-2:] == (3, 3):
-        raise ValueError(
-            "Input camera_matrix must be in the shape of (*, 3, 3).")
-    # projection eq. K_inv * [u v 1]'
-    # x = (u - cx) * Z / fx
-    # y = (v - cy) * Z / fy
-
-    # unpack coordinates
-    u_coord: torch.Tensor = point_2d[..., 0:1]
-    v_coord: torch.Tensor = point_2d[..., 1:2]
-
-    # unpack intrinsics
-    fx: torch.Tensor = camera_matrix[..., 0:1, 0]
-    fy: torch.Tensor = camera_matrix[..., 1:2, 1]
-    cx: torch.Tensor = camera_matrix[..., 0:1, 2]
-    cy: torch.Tensor = camera_matrix[..., 1:2, 2]
-
-    # projective
-    x_coord: torch.Tensor = (u_coord - cx) / fx
-    y_coord: torch.Tensor = (v_coord - cy) / fy
-
-    xyz: torch.Tensor = torch.cat([x_coord, y_coord], dim=-1)
-    xyz = convert_points_to_homogeneous(xyz)
-
-    if normalize:
-        xyz = F.normalize(xyz, dim=-1, p=2)
-
-    return xyz * depth
-
-
-
-
-def normalize_quaternion(quaternion: torch.Tensor,
-                         eps: float = 1e-12) -> torch.Tensor:
+def normalize_quaternion(quaternion):
     r"""Normalizes a quaternion.
-    The quaternion should be in (x, y, z, w) format.
+    The quaternion should be in (w, x, y, z) format.
     Args:
         quaternion (torch.Tensor): a tensor containing a quaternion to be
           normalized. The tensor can be of shape :math:`(*, 4)`.
-        eps (Optional[bool]): small value to avoid division by zero.
-          Default: 1e-12.
     Return:
         torch.Tensor: the normalized quaternion of shape :math:`(*, 4)`.
-    Example:
-        >>> quaternion = torch.tensor([1., 0., 1., 0.])
-        >>> kornia.normalize_quaternion(quaternion)
-        tensor([0.7071, 0.0000, 0.7071, 0.0000])
     """
     if not isinstance(quaternion, torch.Tensor):
         raise TypeError("Input type is not a torch.Tensor. Got {}".format(
@@ -155,7 +21,178 @@ def normalize_quaternion(quaternion: torch.Tensor,
         raise ValueError(
             "Input must be a tensor of shape (*, 4). Got {}".format(
                 quaternion.shape))
-    return quaternion
+    return _restrict_hemisphere(quaternion / quaternion.norm(dim=1).unsqueeze(-1))
+
+
+def qmul(q, r):
+    """
+    Multiply quaternion(s) q with quaternion(s) r.
+    Expects two equally-sized tensors of shape (*, 4), where * denotes any number of dimensions.
+    Returns q*r as a tensor of shape (*, 4).
+    """
+
+    assert q.shape[-1] == 4
+    assert r.shape[-1] == 4
+
+    original_shape = q.shape
+
+    # Compute outer product
+    terms = torch.bmm(r.view(-1, 4, 1), q.view(-1, 1, 4))
+
+    w = terms[:, 0, 0] - terms[:, 1, 1] - terms[:, 2, 2] - terms[:, 3, 3]
+    x = terms[:, 0, 1] + terms[:, 1, 0] - terms[:, 2, 3] + terms[:, 3, 2]
+    y = terms[:, 0, 2] + terms[:, 1, 3] + terms[:, 2, 0] - terms[:, 3, 1]
+    z = terms[:, 0, 3] - terms[:, 1, 2] + terms[:, 2, 1] + terms[:, 3, 0]
+    return torch.stack((w, x, y, z), dim=1).view(original_shape)
+
+
+def qinv(q):
+    assert q.shape[-1] == 4
+    return q * torch.tensor([1., -1., -1., -1.], device=q.device)
+
+
+# todo: check
+def get_pose_xfrm(l, m):
+    assert l.shape[-1] == 7
+    assert m.shape[-1] == 7
+
+    l_pos, l_orient = l[:, :3], l[:, 3:]
+    m_pos, m_orient = m[:, :3], m[:, 3:]
+
+    t_pos = m_pos - l_pos
+    t_orient = qmul(m_orient, qinv(l_orient))
+    return torch.cat([t_pos, t_orient], dim=1)
+
+# todo: check
+def apply_pose_xfrm(l, T):
+    assert l.shape[-1] == 7
+    assert T.shape[-1] == 7
+
+    l_pos, l_orient = l[:, :3], l[:, 3:]
+    T_pos, T_orient = T[:, :3], T[:, 3:]
+
+    m_pos = l_pos + T_pos
+    m_orient = qmul(T_orient, l_orient)
+
+    return torch.cat([m_pos, m_orient], dim=1)
+
+
+def pixel_2_cam(depth, intrinsics, scaling_factor=20):
+    dev = depth.device
+    depth = depth.squeeze(1)
+    b, h, w = depth.shape
+    depth = depth.view(b, -1)
+    intrinsics = intrinsics.unsqueeze(1).repeat(1, w * h, 1, 1)
+    u = torch.arange(0, w, device=dev).view(1, -1).unsqueeze(0).repeat(b, h, 1).view(b, -1)
+    v = torch.arange(0, h, device=dev).view(-1, 1).unsqueeze(0).repeat(b, 1, w).view(b, -1)
+    pixel_coord = torch.cat([u.unsqueeze(-1), v.unsqueeze(-1), torch.ones_like(v.unsqueeze(-1))], dim=2).unsqueeze(-1)
+    cam_coord = intrinsics.matmul(pixel_coord.float()) * (1. - depth).unsqueeze(-1).unsqueeze(-1) * scaling_factor
+    return cam_coord.view(b, h, w, 3)
+
+
+def cam_2_pixel(cam_coord, intrinsics):
+    b, h, w, d = cam_coord.shape
+    cam_coord = cam_coord.view(b, w*h, 3, 1)
+    intrinsics_inv = intrinsics.inverse().unsqueeze(1).repeat(1, w*h, 1, 1)
+    pixel_coord = intrinsics_inv.matmul(cam_coord)
+    pixel_coord_norm = (pixel_coord / pixel_coord[..., 2, 0].unsqueeze(-1).unsqueeze(-1))
+    return pixel_coord_norm.squeeze(-1)[..., :2].view(b, h, w, 2)
+
+
+def qtvec_to_transformation_matrix(pose):
+    """Converts a pose vector [x, y, z, q0, q1, q2, q3] to a transformation matrix.
+        The quaternion should be in (w, x, y, z) format.
+        Args:
+            pose (torch.Tensor): a tensor containing a translations and quaternion to be
+              converted. The tensor can be of shape :math:`(*, 7)`.
+        Return:
+            torch.Tensor: the transformation matrix of shape :math:`(*, 4, 4)`."""
+    b, _ = pose.shape
+    p, q = pose.split([3, 4], dim=1)
+    rot_matrix = quaternion_to_rotation_matrix(q)
+    zero_padding = torch.zeros(3, device=pose.device).unsqueeze(0).repeat(b, 1, 1)
+    p_padded = torch.cat([p, torch.ones(1, device=pose.device).unsqueeze(0).repeat(b, 1)], dim=1).view(b, 4, 1)
+    trans_matrix = torch.cat([torch.cat([rot_matrix, zero_padding], dim=1), p_padded], dim=-1)
+    return trans_matrix
+
+
+# def img_from_pixel(img, pixel_coord):
+#     dev = img.device
+#     b, c, h, w = img.shape
+#     img.view(b, c, -1)
+#     u = pixel_coord[..., 0, 0]
+#     v = pixel_coord[..., 1, 0]
+#     # d = pixel_coord[..., 2, 0]
+#
+#     idxs = (u + v * w).where((u > 0) & (u < w) & (v > 0) & (v < h), torch.tensor(-1, device=dev)).long()
+#     idxs_unfolded = (idxs + b * c * w * h * torch.arange(0, b, device=dev).unsqueeze(-1)).view(-1)
+#     img_unfolded = img.view(-1)
+#     out = img_unfolded.where(idxs_unfolded >= 0, torch.tensor([0.], device=dev))
+#
+#     return out.view(b, c, h, w)
+
+def warp_img_2_pixel(img, pixel, padding_mode="zeros"):
+
+    projected_img = F.grid_sample(img, pixel, padding_mode=padding_mode)
+
+
+def inverse_warp(img, depth, pose, intrinsics, rotation_mode='euler', padding_mode='zeros'):
+    """
+    Inverse warp a source image to the target image plane.
+    Args:
+        img: the source image (where to sample pixels) -- [B, 3, H, W]
+        depth: depth map of the target image -- [B, H, W]
+        pose: 6DoF pose parameters from target to source -- [B, 6]
+        intrinsics: camera intrinsic matrix -- [B, 3, 3]
+    Returns:
+        projected_img: Source image warped to the target image plane
+        valid_points: Boolean array indicating point validity
+    """
+    # check_sizes(img, 'img', 'B3HW')
+    # check_sizes(depth, 'depth', 'BHW')
+    # check_sizes(pose, 'pose', 'B6')
+    # check_sizes(intrinsics, 'intrinsics', 'B33')
+    #
+    # batch_size, _, img_height, img_width = img.size()
+    #
+    # cam_coords = pixel2cam(depth, intrinsics.inverse())  # [B,3,H,W]
+    #
+    # pose_mat = pose_vec2mat(pose, rotation_mode)  # [B,3,4]
+    #
+    # # Get projection matrix for tgt camera frame to source pixel frame
+    # proj_cam_to_src_pixel = intrinsics @ pose_mat  # [B, 3, 4]
+    #
+    # rot, tr = proj_cam_to_src_pixel[:,:,:3], proj_cam_to_src_pixel[:,:,-1:]
+    # src_pixel_coords = cam2pixel(cam_coords, rot, tr, padding_mode)  # [B,H,W,2]
+    projected_img = F.grid_sample(img, src_pixel_coords, padding_mode=padding_mode)
+
+    valid_points = src_pixel_coords.abs().max(dim=-1)[0] <= 1
+
+    return projected_img, valid_points
+
+
+def transform_points(points, trans):
+    """Apply pose transformation [x, y, z, q0, q1, q2, q3] to a cam_coordinates.
+        The quaternion should be in (w, x, y, z) format.
+        Args:
+            points (torch.Tensor): tensor of points of shape :math:`(BxNx3)`.
+            trans (torch.Tensor): tensor for transformations of shape :math:`(B, 7)`.
+        Return:
+            torch.Tensor: the transformation matrix of shape :math:`(*, 4, 4)`."""
+    b, h, w, _ = points.shape
+    points = points.view(b, h*w, 3)
+    trans_matrix = qtvec_to_transformation_matrix(trans)
+    points_transformed = kornia.transform_points(trans_matrix, points)
+    return points_transformed.view(b, h, w, 3)
+
+
+# def transform_pts(points, trans):
+#     transl = trans[..., :3]
+#     rot_quat = trans[..., 3:]
+#     rot_matrix = quaternion_to_rotation_matrix(rot_quat)
+#     points_xfrmd = (rot_matrix.unsqueeze(1).unsqueeze(1).matmul(points.unsqueeze(-1))) +\
+#         transl.unsqueeze(1).unsqueeze(1).unsqueeze(-1)
+#     return points_xfrmd.squeeze(-1)
 
 
 def quaternion_to_rotation_matrix(quaternion: torch.Tensor) -> torch.Tensor:
@@ -296,6 +333,6 @@ def rotation_matrix_to_quaternion(
 
 
 def _restrict_hemisphere(quaternion):
-    sign = torch.sign(quaternion.index_select(dim=-1, index=torch.tensor([0])))
+    sign = torch.sign(quaternion.index_select(dim=-1, index=torch.tensor([0], device=quaternion.device)))
     sign[sign == 0.] = 1.
     return quaternion * sign
