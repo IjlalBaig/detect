@@ -108,6 +108,8 @@ class Net(nn.Module):
         return x, x_xfrmd, z, mu, log_var
 
 
+import torch
+
 def depth_2_point(depth, scaling_factor=1, focal_length=0.03):
     dev = depth.device
     b, c, h, w = depth.size()

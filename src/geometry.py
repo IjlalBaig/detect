@@ -171,6 +171,10 @@ def inverse_warp(img, depth, pose, intrinsics, rotation_mode='euler', padding_mo
     return projected_img, valid_points
 
 
+def world_2_cam_xfrm(trans):
+    trans = trans * torch.tensor([1., 1., -1., 1., 1., 1., -1.], device=trans.device)
+    return trans.index_select(1, torch.tensor([0, 2, 1, 3, 4, 6, 5], device=trans.device).long())
+
 def transform_points(points, trans):
     """Apply pose transformation [x, y, z, q0, q1, q2, q3] to a cam_coordinates.
         The quaternion should be in (w, x, y, z) format.
@@ -181,7 +185,8 @@ def transform_points(points, trans):
             torch.Tensor: the transformation matrix of shape :math:`(*, 4, 4)`."""
     b, h, w, _ = points.shape
     points = points.view(b, h*w, 3)
-    trans_matrix = qtvec_to_transformation_matrix(trans)
+    trans_cam = world_2_cam_xfrm(trans)
+    trans_matrix = qtvec_to_transformation_matrix(trans_cam)
     points_transformed = kornia.transform_points(trans_matrix, points)
     return points_transformed.view(b, h, w, 3)
 
