@@ -111,25 +111,36 @@ class Net(nn.Module):
 def depth_2_point(depth, scaling_factor=1, focal_length=0.03):
     dev = depth.device
     b, c, h, w = depth.size()
+    sx = sy = 0.036
+    f_x = w / sx * focal_length
+    f_y = h / sy * focal_length
     c_x = (depth.size(-1) - 1) / 2.0
     c_y = (depth.size(-2) - 1) / 2.0
     z_pos = (1 - depth) * scaling_factor
-    y_pos = torch.arange(-c_y, c_y + 1, device=dev).view(-1, 1).repeat(b, c, 1, w) * z_pos / focal_length
-    x_pos = torch.arange(-c_x, c_x + 1, device=dev).repeat(b, c, h, 1) * z_pos / focal_length
+    y_pos = torch.arange(-c_y, c_y + 1, device=dev).view(-1, 1).repeat(b, c, 1, w) * z_pos / f_x
+    x_pos = torch.arange(-c_x, c_x + 1, device=dev).repeat(b, c, h, 1) * z_pos / f_y
 
     return torch.cat([x_pos, y_pos, z_pos], dim=1).permute(0, 2, 3, 1).view(b, h, w, 3)
 
 
 def point_2_pixel(point, scaling_factor, focal_length=0.05):
     b, h, w, _  = point.shape
+    sx = sy = 0.036
+    f_x = w / sx * focal_length
+    f_y = h / sy * focal_length
+    c_x = (w - 1) / 2.0
+    c_y = (h - 1) / 2.0
+
     x_pos = point[..., 0]
     y_pos = point[..., 1]
     z_pos = point[..., 2]
-    d = z_pos * scaling_factor
-    u = (x_pos * focal_length / z_pos + 0.5) / (w/2)
-    v = (y_pos * focal_length / z_pos + 0.5) / (h/2)
 
-    return torch.cat([u.unsqueeze(-1), v.unsqueeze(-1)], dim=-1)
+    u = x_pos * f_x / z_pos + c_x
+    v = y_pos * f_y / z_pos + c_y
+    u_norm = (u - c_x) / c_x
+    v_norm = (v - c_y) / c_y
+
+    return torch.cat([u_norm.unsqueeze(-1), v_norm.unsqueeze(-1)], dim=-1)
 
 
 def warp_img_2_pixel(img, pixel):
