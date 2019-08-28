@@ -57,8 +57,9 @@ class EnvironmentDataset(Dataset):
             im_path = os.path.join(os.path.dirname(fpath), sample.get("rgb_id", ""))
             depth_path = os.path.join(os.path.dirname(fpath), sample.get("depth_id", ""))
             mask_paths = []
-            for mask_id in sample.get("mask_ids", ""):
-                mask_paths.append(os.path.join(os.path.dirname(fpath), mask_id))
+            if self._read_masks:
+                for mask_id in sample.get("mask_ids", []):
+                    mask_paths.append(os.path.join(os.path.dirname(fpath), mask_id))
 
             # intrinsics
             f = 30
@@ -91,7 +92,7 @@ class EnvironmentDataset(Dataset):
         data_frame = self._data_frames[idx]
         im_path = data_frame.get("im_path")
         depth_path = data_frame.get("depth_path")
-        mask_paths = data_frame.get("mask_paths")
+        mask_paths = data_frame.get("mask_paths", [])
 
         im = Image.open(im_path).convert(self._im_mode)
         depth = Image.open(depth_path).convert("L")
