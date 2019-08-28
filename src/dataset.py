@@ -5,12 +5,13 @@ from torchvision import transforms
 import glob
 import os
 from PIL import Image
+from math import cos, sin
+from scipy.spatial.transform import Rotation as R
 
 import src.utils as utils
 
-
 class EnvironmentDataset(Dataset):
-    def __init__(self, dpath, im_dims=(1024, 1024), im_mode="L", read_masks=False):
+    def __init__(self, dpath, im_dims=(1024, 1024), im_mode="L", read_masks=False, standardize=False):
         self._dpath = dpath
         self._im_size = im_dims[:2]
         self._im_mode = im_mode
@@ -18,6 +19,24 @@ class EnvironmentDataset(Dataset):
         self._read_masks = read_masks
         self._data_frames = []
         self._load_data()
+        self._im_mean = 0.  # 0.3578
+        self._im_std = 1.   # 0.1101
+        self.standardize_pose = standardize
+
+    def _compute_standardization(self):
+        loader = torch.utils.data.DataLoader(self, batch_size=10, num_workers=0, shuffle=False)
+        mean = 0.
+        meansq = 0.
+        for data in loader:
+            mean = data["im"].mean()
+            meansq = (data["im"] ** 2).mean()
+
+        std = torch.sqrt(meansq - mean ** 2)
+        self._im_mean = mean
+        self._im_std = std
+        print("mean: " + str(mean))
+        print("std: " + str(std))
+        print()
 
     def _read_data_file(self, fpath):
         data = utils.read_json(fpath)
@@ -25,9 +44,14 @@ class EnvironmentDataset(Dataset):
         for sample in data:
 
             position = sample.get("cam_position", [])
-            orientation = sample.get("cam_quaternion", [1, 0, 0, 0])
-            if orientation[0] < 0:
-                orientation = [o*-1 for o in orientation]
+            orient_quat = sample.get("cam_quaternion", [1., 0., 0., 0.])
+            orient_euler = R.from_quat(orient_quat).as_euler("xyz").tolist()
+            orientation = [sin(orient_euler[0]), cos(orient_euler[0]),
+                           sin(orient_euler[1]), cos(orient_euler[1]),
+                           sin(orient_euler[2]), cos(orient_euler[2])]
+            # convert to positive hemisphere
+            # if orientation[0] < 0:
+            #     orientation = [o*-1 for o in orientation]
             pose = position + orientation
 
             im_path = os.path.join(os.path.dirname(fpath), sample.get("rgb_id", ""))
@@ -76,8 +100,8 @@ class EnvironmentDataset(Dataset):
             for mask_path in mask_paths:
                 masks.append(Image.open(mask_path).convert("L"))
 
-        mean = [0.0] * self._channels
-        std = [1.0] * self._channels
+        mean = [self._im_mean] * self._channels
+        std = [self._im_std] * self._channels
         im_xfrmed = transforms.Compose([transforms.Resize(self._im_size),
                                         transforms.ToTensor(),
                                         transforms.Normalize(mean, std)])(im)
@@ -97,11 +121,17 @@ class EnvironmentDataset(Dataset):
         else:
             masks_xfrmed = torch.tensor(masks_xfrmed, dtype=torch.float)
 
-        pose_xfrmed = torch.tensor(data_frame.get("pose"), dtype=torch.float)
-
+        if self.standardize_pose:
+            pose_mean = torch.tensor([2.6116e-03,  8.2505e-04,  1.4994e+00, 0.0,  0.0, 0.0,  0.0, 0.0, 0.0])
+            pose_std = torch.tensor([0.2930, 0.2958, 0.0578, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
+        else:
+            pose_mean = torch.tensor([0., 0., 0., 0., 0., 0., 0., 0., 0.])
+            pose_std = torch.tensor([1., 1., 1., 1., 1., 1., 1., 1., 1.])
+        pose_xfrmed = (torch.tensor(data_frame.get("pose"), dtype=torch.float) - pose_mean) / pose_std
+        # pose_xfrmed = torch.tensor(data_frame.get("pose"), dtype=torch.float)
         intrinsics_xformed = torch.tensor(data_frame.get("intrinsics"), dtype=torch.float)
 
-        sample = {"im": im_xfrmed, "depth": depth_xfrmed,
-                  "pose": pose_xfrmed, "masks": masks_xfrmed,
+        sample = {"im": im_xfrmed, "depth": depth_xfrmed, "masks": masks_xfrmed,
+                  "pose": pose_xfrmed, "pose_mean": pose_mean, "pose_std": pose_std,
                   "intrinsics": intrinsics_xformed}
         return sample

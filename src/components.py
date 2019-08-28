@@ -16,7 +16,7 @@ class PoseTransformSampler(nn.Module):
             torch.Tensor: the pose transform of shape :math:`(*, 7)`, representing translation (x, y, z) and
             quaternion orientation (w, x, y, z) transform.
         """
-    def __init__(self, device, variance=(0.1, 0.2)):
+    def __init__(self, device, variance=(0.1, 0.05)):
         super(PoseTransformSampler, self).__init__()
         self.device = device
         self.transl_variance = variance[0]
@@ -52,10 +52,10 @@ class InductiveBiasLoss(nn.Module):
         self.ssim_loss = SSIM(win_size=11, win_sigma=1.5, data_range=255, size_average=True, channel=1)
 
     def forward(self, pose_xfrm, im_pred, im_xfrmd_pred, depth, intrinsics):
-        cam_coord = geo.pixel_2_cam(depth.squeeze(1), intrinsics)
-        cam_coord_xfrmd = geo.transform_points(cam_coord.squeeze(-1), pose_xfrm)
-        pixel_coord_xfrmd = geo.cam_2_pixel(cam_coord_xfrmd.unsqueeze(-1), intrinsics)
-        im_pred_geo = geo.img_from_pixel(im_pred, pixel_coord_xfrmd)
+        point = geo.depth_2_point(depth, 20, 0.03)
+        point_xfrmd = geo.transform_points(point, pose_xfrm)
+        pixel = geo.point_2_pixel(point_xfrmd, 20, 0.03)
+        im_pred_geo = geo.warp_img_2_pixel(im_pred, pixel)
         im_xfrmd_pred = im_xfrmd_pred.where(im_pred_geo > 0, torch.tensor([0.], device=im_pred_geo.device))
         return torch.exp(- self.ssim_loss(im_xfrmd_pred*255, im_pred_geo*255)), im_pred_geo, im_xfrmd_pred
 

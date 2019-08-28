@@ -8,6 +8,7 @@ from pytorch_msssim import SSIM, MS_SSIM
 import kornia
 import src.geometry as geo
 import random
+from torchvision.models import GoogLeNet
 
 
 class Net(nn.Module):
@@ -25,12 +26,12 @@ class Net(nn.Module):
         self.conv4 = nn.Conv2d(128, 128, kernel_size=2, stride=2)   # 8
         self.conv5 = nn.Conv2d(128, 128, kernel_size=2, stride=2)    # 4
         '''-------------------------------------------------------------''' #
-        self.fce1 = nn.Linear(512, 512)
+        self.fce1 = nn.Linear(2048, 512)
         self.fce2 = nn.Linear(512, 128)
         self.fce3 = nn.Linear(128, 64)
         self.fce4 = nn.Linear(64, z_dim * 2)
 
-        self.fcd7 = nn.Linear(7, 512)
+        self.fcd7 = nn.Linear(9, 512)
         self.fcd6 = ResidualFC(512)
         # self.fcd5 = ResidualFC(2048)
         # self.fcd4 = ResidualFC(2048)
@@ -66,149 +67,67 @@ class Net(nn.Module):
 
     def forward(self, x, p, p_xfrm):
         # c = self.context_gen(x, p, repeat=p.size(0))
-
         x = F.relu(self.conv1(x))
         x = F.relu(self.conv2(x))
+
         x = F.relu(self.conv3(x))
         x = F.relu(self.conv4(x))
         x = F.relu(self.conv5(x))
         x_conv2d_shape = x.shape
         x = x.view(-1, x.size(1) * x.size(2) * x.size(3))
-
+        #
         x = F.relu(self.fce1(x))
         x = F.relu(self.fce2(x))
         x = F.relu(self.fce3(x))
         x = self.fce4(x)
-
+        #
         mu, log_var = torch.chunk(x, 2, dim=1)
         z = self.reparameterize(mu, log_var)
-        p = torch.cat([z[:, :3], geo.normalize_quaternion(z[:, 3:])], dim=1)
-        x = F.relu(self.fcd7(p))
-        x = F.relu(self.fcd6(x))
+        # p = torch.cat([z[:, :3], geo.normalize_quaternion(z[:, 3:])], dim=1)
+        # x = F.relu(self.fcd7(p))
+        # x = F.relu(self.fcd6(x))
 
-        x = x.view(x_conv2d_shape)
-        x = F.relu(self.deconv5(x))
-        x = F.relu(self.deconv4(x))
-        x = F.relu(self.deconv3(x))
-        x = F.relu(self.deconv2(x))
-        x = F.relu(self.deconv1(x))
+        # x = x.view(x_conv2d_shape)
+        # x = x.view(-1, 128, 2, 2)
+        # x = F.relu(self.deconv5(x))
+        # x = F.relu(self.deconv4(x))
+        # x = F.relu(self.deconv3(x))
+        # x = F.relu(self.deconv2(x))
+        # x = F.relu(self.deconv1(x))
 
-        p_xfrmd = geo.apply_pose_xfrm(p, p_xfrm)
-
-        x_xfrmd = F.relu(self.fcd7(p_xfrmd))
-        x_xfrmd = F.relu(self.fcd6(x_xfrmd))
-
-        x_xfrmd = x_xfrmd.view(x_conv2d_shape)
-        x_xfrmd = F.relu(self.deconv5(x_xfrmd))
-        x_xfrmd = F.relu(self.deconv4(x_xfrmd))
-        x_xfrmd = F.relu(self.deconv3(x_xfrmd))
-        x_xfrmd = F.relu(self.deconv2(x_xfrmd))
-        x_xfrmd = F.relu(self.deconv1(x_xfrmd))
-
+        # p_xfrmd = geo.apply_pose_xfrm(p, p_xfrm)
+        #
+        # x_xfrmd = F.relu(self.fcd7(p_xfrmd))
+        # x_xfrmd = F.relu(self.fcd6(x_xfrmd))
+        #
+        # x_xfrmd = x_xfrmd.view(x_conv2d_shape)
+        # x_xfrmd = F.relu(self.deconv5(x_xfrmd))
+        # x_xfrmd = F.relu(self.deconv4(x_xfrmd))
+        # x_xfrmd = F.relu(self.deconv3(x_xfrmd))
+        # x_xfrmd = F.relu(self.deconv2(x_xfrmd))
+        # x_xfrmd = F.relu(self.deconv1(x_xfrmd))
+        x, x_xfrmd = 0.0, 0.0
         return x, x_xfrmd, z, mu, log_var
 
 
-import torch
+# import torch
+# from PIL import Image
+# from torchvision import transforms
+# import src.geometry as geo
+# import torch.nn.functional as F
+# d = Image.open("D:\\Thesis\\Implementation\\code\\data\\blender_data\\blender_session\\2019_Jul_20_07_28_29\\depth0017.png")
+# c = Image.open("D:\\Thesis\\Implementation\\code\\data\\blender_data\\blender_session\\2019_Jul_20_07_28_29\\image0017.png")
+# depth = transforms.ToTensor()(d.convert("L")).unsqueeze(0).repeat(2, 1, 1, 1)
+# img = transforms.ToTensor()(c.convert("L")).unsqueeze(0).repeat(2, 1, 1, 1)
+# transform = torch.tensor([[1., 0., 0., 1, 0., 0, 0], [0, 0, 0, 0.403, 0.532, 0.736, -0.113]])
+# point = geo.depth_2_point(depth, 20, 0.03)
+# point = geo.transform_points(point, transform)
+# pixel = geo.point_2_pixel(point, 20, 0.03)
+# out = geo.warp_img_2_pixel(img, pixel)
+# out_1, out_2 = transforms.ToPILImage()(out[0]), transforms.ToPILImage()(out[1])
+# out_1.show()
+# out_2.show()
 
-def depth_2_point(depth, scaling_factor=1, focal_length=0.03):
-    dev = depth.device
-    b, c, h, w = depth.size()
-    sx = sy = 0.036
-    f_x = w / sx * focal_length
-    f_y = h / sy * focal_length
-    c_x = (depth.size(-1) - 1) / 2.0
-    c_y = (depth.size(-2) - 1) / 2.0
-    z_pos = (1 - depth) * scaling_factor
-    y_pos = torch.arange(-c_y, c_y + 1, device=dev).view(-1, 1).repeat(b, c, 1, w) * z_pos / f_x
-    x_pos = torch.arange(-c_x, c_x + 1, device=dev).repeat(b, c, h, 1) * z_pos / f_y
-
-    return torch.cat([x_pos, y_pos, z_pos], dim=1).permute(0, 2, 3, 1).view(b, h, w, 3)
-
-
-def point_2_pixel(point, scaling_factor, focal_length=0.05):
-    b, h, w, _  = point.shape
-    sx = sy = 0.036
-    f_x = w / sx * focal_length
-    f_y = h / sy * focal_length
-    c_x = (w - 1) / 2.0
-    c_y = (h - 1) / 2.0
-
-    x_pos = point[..., 0]
-    y_pos = point[..., 1]
-    z_pos = point[..., 2]
-
-    u = x_pos * f_x / z_pos + c_x
-    v = y_pos * f_y / z_pos + c_y
-    u_norm = (u - c_x) / c_x
-    v_norm = (v - c_y) / c_y
-
-    return torch.cat([u_norm.unsqueeze(-1), v_norm.unsqueeze(-1)], dim=-1)
-
-
-def warp_img_2_pixel(img, pixel):
-    return F.grid_sample(img, pixel)
-
-
-import torch
-from PIL import Image
-from torchvision import transforms
-import src.geometry as geo
-import torch.nn.functional as F
-d = Image.open("D:\\Thesis\\Implementation\\code\\data\\blender_data\\blender_session\\2019_Jul_20_07_28_29\\depth0017.png")
-c = Image.open("D:\\Thesis\\Implementation\\code\\data\\blender_data\\blender_session\\2019_Jul_20_07_28_29\\image0017.png")
-depth = transforms.ToTensor()(d.convert("L")).unsqueeze(0).repeat(2, 1, 1, 1)
-img = transforms.ToTensor()(c.convert("L")).unsqueeze(0).repeat(2, 1, 1, 1)
-transform = torch.tensor([[1., 0., 0., 1, 0., 0, 0], [0, 0, 0, 0.403, 0.532, 0.736, -0.113]])
-
-
-
-point = depth_2_point(depth, 20, 0.03)
-
-point = geo.transform_points(point, transform)
-
-
-pixel = point_2_pixel(point, 20, 0.03)
-out = warp_img_2_pixel(img, pixel)
-out_1, out_2 = transforms.ToPILImage()(out[0]), transforms.ToPILImage()(out[1])
-out_1.show()
-out_2.show()
-
-# def map_2_pixel(img, pixel):
-#     b, c, h, w, *_ = pixel.size()
-#     u = pixel[:, :, :, :, 0].view(-1).int()
-#     v = pixel[:, :, :, :, 1].view(-1).int()
-#     bound_mask = (u.ge(0) * u.lt(w) * v.ge(0) * v.lt(h)).int()
-#     u = u * bound_mask
-#     v = v * bound_mask
-#     i = torch.add(u, w, v)
-    d = pixel[:, :, :, :, 2].view(b, c, -1)
-    # out_size = img.size()
-    # img = img.view(-1)
-    # out = torch.zeros_like(img)
-    # out[i] = img
-    # out.view(out_size)
-    # return out
-
-
-
-
-img = Image.open("D:\\Thesis\\Implementation\\code\\data\\blender_data\\blender_session\\2019_Jul_20_07_28_29\\depth0017.png")
-img_t = transforms.ToTensor()(img.convert("L"))
-img_b = img_t.unsqueeze(0).repeat(2, 1, 1, 1)
-intrinsics = (torch.tensor([[106.66, 0, 63.5], [0, 106.666, 63.5], [0, 0, 1]])).unsqueeze(0).repeat(2, 1, 1)
-transform = torch.tensor([[0., 0., 0., 1, 0., 0, 0], [0, 0, 0, 0.403, 0.532, 0.736, -0.113]])
-# todo: check
-cam = pixel_2_cam(img_b.squeeze(1), intrinsics)
-
-cam_transformed = transform_points(cam.squeeze(-1), transform)
-# todo: check
-pixel = cam_2_pixel(cam_transformed.unsqueeze(-1), intrinsics)
-# todo: check
-# out = img_from_pixel(img_b, pixel)
-out = F.grid_sample(img_bc, pixel)
-out_1, out_2 = transforms.ToPILImage()(out[0]), transforms.ToPILImage()(out[1])
-out_1.show()
-out_2.show()
 
 class Net2(nn.Module):
     def __init__(self, z_dim):

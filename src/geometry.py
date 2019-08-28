@@ -51,7 +51,6 @@ def qinv(q):
     return q * torch.tensor([1., -1., -1., -1.], device=q.device)
 
 
-# todo: check
 def get_pose_xfrm(l, m):
     assert l.shape[-1] == 7
     assert m.shape[-1] == 7
@@ -63,7 +62,7 @@ def get_pose_xfrm(l, m):
     t_orient = qmul(m_orient, qinv(l_orient))
     return torch.cat([t_pos, t_orient], dim=1)
 
-# todo: check
+
 def apply_pose_xfrm(l, T):
     assert l.shape[-1] == 7
     assert T.shape[-1] == 7
@@ -75,28 +74,6 @@ def apply_pose_xfrm(l, T):
     m_orient = qmul(T_orient, l_orient)
 
     return torch.cat([m_pos, m_orient], dim=1)
-
-
-def pixel_2_cam(depth, intrinsics, scaling_factor=20):
-    dev = depth.device
-    depth = depth.squeeze(1)
-    b, h, w = depth.shape
-    depth = depth.view(b, -1)
-    intrinsics = intrinsics.unsqueeze(1).repeat(1, w * h, 1, 1)
-    u = torch.arange(0, w, device=dev).view(1, -1).unsqueeze(0).repeat(b, h, 1).view(b, -1)
-    v = torch.arange(0, h, device=dev).view(-1, 1).unsqueeze(0).repeat(b, 1, w).view(b, -1)
-    pixel_coord = torch.cat([u.unsqueeze(-1), v.unsqueeze(-1), torch.ones_like(v.unsqueeze(-1))], dim=2).unsqueeze(-1)
-    cam_coord = intrinsics.matmul(pixel_coord.float()) * (1. - depth).unsqueeze(-1).unsqueeze(-1) * scaling_factor
-    return cam_coord.view(b, h, w, 3)
-
-
-def cam_2_pixel(cam_coord, intrinsics):
-    b, h, w, d = cam_coord.shape
-    cam_coord = cam_coord.view(b, w*h, 3, 1)
-    intrinsics_inv = intrinsics.inverse().unsqueeze(1).repeat(1, w*h, 1, 1)
-    pixel_coord = intrinsics_inv.matmul(cam_coord)
-    pixel_coord_norm = (pixel_coord / pixel_coord[..., 2, 0].unsqueeze(-1).unsqueeze(-1))
-    return pixel_coord_norm.squeeze(-1)[..., :2].view(b, h, w, 2)
 
 
 def qtvec_to_transformation_matrix(pose):
@@ -116,64 +93,10 @@ def qtvec_to_transformation_matrix(pose):
     return trans_matrix
 
 
-# def img_from_pixel(img, pixel_coord):
-#     dev = img.device
-#     b, c, h, w = img.shape
-#     img.view(b, c, -1)
-#     u = pixel_coord[..., 0, 0]
-#     v = pixel_coord[..., 1, 0]
-#     # d = pixel_coord[..., 2, 0]
-#
-#     idxs = (u + v * w).where((u > 0) & (u < w) & (v > 0) & (v < h), torch.tensor(-1, device=dev)).long()
-#     idxs_unfolded = (idxs + b * c * w * h * torch.arange(0, b, device=dev).unsqueeze(-1)).view(-1)
-#     img_unfolded = img.view(-1)
-#     out = img_unfolded.where(idxs_unfolded >= 0, torch.tensor([0.], device=dev))
-#
-#     return out.view(b, c, h, w)
-
-def warp_img_2_pixel(img, pixel, padding_mode="zeros"):
-
-    projected_img = F.grid_sample(img, pixel, padding_mode=padding_mode)
-
-
-def inverse_warp(img, depth, pose, intrinsics, rotation_mode='euler', padding_mode='zeros'):
-    """
-    Inverse warp a source image to the target image plane.
-    Args:
-        img: the source image (where to sample pixels) -- [B, 3, H, W]
-        depth: depth map of the target image -- [B, H, W]
-        pose: 6DoF pose parameters from target to source -- [B, 6]
-        intrinsics: camera intrinsic matrix -- [B, 3, 3]
-    Returns:
-        projected_img: Source image warped to the target image plane
-        valid_points: Boolean array indicating point validity
-    """
-    # check_sizes(img, 'img', 'B3HW')
-    # check_sizes(depth, 'depth', 'BHW')
-    # check_sizes(pose, 'pose', 'B6')
-    # check_sizes(intrinsics, 'intrinsics', 'B33')
-    #
-    # batch_size, _, img_height, img_width = img.size()
-    #
-    # cam_coords = pixel2cam(depth, intrinsics.inverse())  # [B,3,H,W]
-    #
-    # pose_mat = pose_vec2mat(pose, rotation_mode)  # [B,3,4]
-    #
-    # # Get projection matrix for tgt camera frame to source pixel frame
-    # proj_cam_to_src_pixel = intrinsics @ pose_mat  # [B, 3, 4]
-    #
-    # rot, tr = proj_cam_to_src_pixel[:,:,:3], proj_cam_to_src_pixel[:,:,-1:]
-    # src_pixel_coords = cam2pixel(cam_coords, rot, tr, padding_mode)  # [B,H,W,2]
-    projected_img = F.grid_sample(img, src_pixel_coords, padding_mode=padding_mode)
-
-    valid_points = src_pixel_coords.abs().max(dim=-1)[0] <= 1
-
-    return projected_img, valid_points
-
-
 def world_2_cam_xfrm(trans):
     trans = trans * torch.tensor([1., 1., -1., 1., 1., 1., -1.], device=trans.device)
     return trans.index_select(1, torch.tensor([0, 2, 1, 3, 4, 6, 5], device=trans.device).long())
+
 
 def transform_points(points, trans):
     """Apply pose transformation [x, y, z, q0, q1, q2, q3] to a cam_coordinates.
@@ -191,13 +114,43 @@ def transform_points(points, trans):
     return points_transformed.view(b, h, w, 3)
 
 
-# def transform_pts(points, trans):
-#     transl = trans[..., :3]
-#     rot_quat = trans[..., 3:]
-#     rot_matrix = quaternion_to_rotation_matrix(rot_quat)
-#     points_xfrmd = (rot_matrix.unsqueeze(1).unsqueeze(1).matmul(points.unsqueeze(-1))) +\
-#         transl.unsqueeze(1).unsqueeze(1).unsqueeze(-1)
-#     return points_xfrmd.squeeze(-1)
+def depth_2_point(depth, scaling_factor=1, focal_length=0.03):
+    dev = depth.device
+    b, c, h, w = depth.size()
+    sx = sy = 0.036
+    f_x = w / sx * focal_length
+    f_y = h / sy * focal_length
+    c_x = (depth.size(-1) - 1) / 2.0
+    c_y = (depth.size(-2) - 1) / 2.0
+    z_pos = (1 - depth) * scaling_factor
+    y_pos = torch.arange(-c_y, c_y + 1, device=dev).view(-1, 1).repeat(b, c, 1, w) * z_pos / f_x
+    x_pos = torch.arange(-c_x, c_x + 1, device=dev).repeat(b, c, h, 1) * z_pos / f_y
+
+    return torch.cat([x_pos, y_pos, z_pos], dim=1).permute(0, 2, 3, 1).view(b, h, w, 3)
+
+
+def point_2_pixel(point, scaling_factor, focal_length=0.05):
+    b, h, w, _  = point.shape
+    sx = sy = 0.036
+    f_x = w / sx * focal_length
+    f_y = h / sy * focal_length
+    c_x = (w - 1) / 2.0
+    c_y = (h - 1) / 2.0
+
+    x_pos = point[..., 0]
+    y_pos = point[..., 1]
+    z_pos = point[..., 2]
+
+    u = x_pos * f_x / z_pos + c_x
+    v = y_pos * f_y / z_pos + c_y
+    u_norm = (u - c_x) / c_x
+    v_norm = (v - c_y) / c_y
+
+    return torch.cat([u_norm.unsqueeze(-1), v_norm.unsqueeze(-1)], dim=-1)
+
+
+def warp_img_2_pixel(img, pixel):
+    return F.grid_sample(img, pixel)
 
 
 def quaternion_to_rotation_matrix(quaternion: torch.Tensor) -> torch.Tensor:
