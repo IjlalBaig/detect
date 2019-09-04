@@ -8,10 +8,11 @@ import math
 from torch.utils.data import Subset, DataLoader
 from torchvision.utils import make_grid
 import torch.nn.functional as F
-from src.test import Tower, resnet
+from src.test import Tower, resnet, contextnet
 from torch.distributions import Normal
 from torch.optim.lr_scheduler import StepLR
 from pytorch_msssim import SSIM
+from src.utils import Annealer
 
 from tensorboardX import SummaryWriter
 
@@ -51,11 +52,9 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu,
                                                    im_dims=(128, 128), standardize=standardize)
 
     # create model and optimizer
-    # model = Net(z_dim=9, n_channels=1)
-    # model = GoogLeNet()
-    model = resnet()
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
-    lr_scheduler = StepLR(optimizer, step_size=30, gamma=0.5)
+    # model = resnet()
+    model = contextnet(6)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     # ssim_loss = nn.MSELoss()
     ssim_loss = SSIM(win_size=11, win_sigma=1.5, data_range=255, size_average=True, channel=1)
     pose_xfrm_loss = TransformationLoss()
@@ -64,8 +63,10 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu,
 
     pose_xfrm_sampler = PoseTransformSampler(device=device)
 
+    sigma_scheme = Annealer(2.0, 0.7, 80000)
+    mu_scheme = Annealer(5 * 10 ** (-6), 5 * 10 ** (-6), 1.6 * 10 ** 5)
     # create engines
-    trainer_engine = create_trainer_engine(model, optimizer, loss_recon=ssim_loss, loss_pose=pose_xfrm_loss,
+    trainer_engine = create_trainer_engine(model, optimizer, sigma_scheme, mu_scheme, loss_recon=ssim_loss, loss_pose=pose_xfrm_loss,
                                            loss_ib=ib_loss, xfrm_sampler=pose_xfrm_sampler, device=device)
     evaluator_engine = create_evaluator_engine(model, loss_recon=ssim_loss, loss_pose=pose_xfrm_loss,
                                                loss_ib=ib_loss, xfrm_sampler=pose_xfrm_sampler, device=device)
@@ -110,20 +111,22 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu,
         batch = engine.state.batch
         model.eval()
         with torch.no_grad():
-            im, depth, pose, masks, intrinsics = _prepare_batch(batch, device=device, non_blocking=True)
+            im, depth, v, masks, intrinsics = _prepare_batch(batch, device=device, non_blocking=True)
             b, c, h, w = im.size()
             pose_xfrm = pose_xfrm_sampler(b)
             # im_pred, im_xfrmd_pred, pose_pred, mu, log_var = model(im, pose, pose_xfrm)
             # pose_pred = model(im, pose)
             # print((pose - pose_pred[0])[:2, :])
+            orient = v[:, 3:]
+            x_pred, ctxt_loss = model(im, orient)
             # _, im_pred_geo, im_xfrmd_pred = ib_loss(pose_xfrm, im_pred, im_xfrmd_pred, depth, intrinsics)
 
             # send to cpu
-            # im = im.detach().cpu().float()
-            # im_pred = im_pred.detach().cpu().float()
+            im = im.detach().cpu().float()
+            im_pred = x_pred.detach().cpu().float()
             # im_xfrmd_pred = im_xfrmd_pred.detach().cpu().float()
-            # writer.add_image("ground truth", make_grid(im), engine.state.epoch)
-            # writer.add_image("reconstruction", make_grid(im_pred), engine.state.epoch)
+            writer.add_image("ground truth", make_grid(im), engine.state.epoch)
+            writer.add_image("reconstruction", make_grid(im_pred), engine.state.epoch)
             # writer.add_image("geometric transformed", make_grid(im_pred_geo), engine.state.epoch)
             # writer.add_image("model transformed", make_grid(im_xfrmd_pred), engine.state.epoch)
 
@@ -132,23 +135,23 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu,
         evaluator_engine.run(val_loader)
         for key, value in evaluator_engine.state.metrics.items():
             if key == "avg_pose":
-                writer.add_scalar("validation/{}/x".format(key), abs(value[0]), engine.state.epoch)
-                writer.add_scalar("validation/{}/y".format(key), abs(value[1]), engine.state.epoch)
-                writer.add_scalar("validation/{}/z".format(key), abs(value[2]), engine.state.epoch)
-                writer.add_scalar("validation/{}/euler_x".format(key), abs(value[3]), engine.state.epoch)
-                writer.add_scalar("validation/{}/euler_y".format(key), abs(value[4]), engine.state.epoch)
-                writer.add_scalar("validation/{}/euler_z".format(key), abs(value[5]), engine.state.epoch)
-            elif key == "max_pose":
-                writer.add_scalar("validation/{}/x".format(key), abs(value[0]), engine.state.epoch)
-                writer.add_scalar("validation/{}/y".format(key), abs(value[1]), engine.state.epoch)
-                writer.add_scalar("validation/{}/z".format(key), abs(value[2]), engine.state.epoch)
-                writer.add_scalar("validation/{}/euler_x".format(key), abs(value[3]), engine.state.epoch)
-                writer.add_scalar("validation/{}/euler_y".format(key), abs(value[4]), engine.state.epoch)
-                writer.add_scalar("validation/{}/euler_z".format(key), abs(value[5]), engine.state.epoch)
+                pass
+                # writer.add_scalar("validation/{}/x".format(key), abs(value[0]), engine.state.epoch)
+                # writer.add_scalar("validation/{}/y".format(key), abs(value[1]), engine.state.epoch)
+                # writer.add_scalar("validation/{}/z".format(key), abs(value[2]), engine.state.epoch)
+                # writer.add_scalar("validation/{}/euler_x".format(key), abs(value[3]), engine.state.epoch)
+                # writer.add_scalar("validation/{}/euler_y".format(key), abs(value[4]), engine.state.epoch)
+                # writer.add_scalar("validation/{}/euler_z".format(key), abs(value[5]), engine.state.epoch)
+            # elif key == "max_pose":
+                # writer.add_scalar("validation/{}/x".format(key), abs(value[0]), engine.state.epoch)
+                # writer.add_scalar("validation/{}/y".format(key), abs(value[1]), engine.state.epoch)
+                # writer.add_scalar("validation/{}/z".format(key), abs(value[2]), engine.state.epoch)
+                # writer.add_scalar("validation/{}/euler_x".format(key), abs(value[3]), engine.state.epoch)
+                # writer.add_scalar("validation/{}/euler_y".format(key), abs(value[4]), engine.state.epoch)
+                # writer.add_scalar("validation/{}/euler_z".format(key), abs(value[5]), engine.state.epoch)
             else:
                 writer.add_scalar("validation/{}".format(key), value, engine.state.epoch)
 
-        lr_scheduler.step()
         # batch = evaluator_engine.state.batch
         # model.eval()
         # with torch.no_grad():
@@ -223,43 +226,44 @@ def _prepare_batch(batch, device=None, non_blocking=False):
             convert_tensor(intrinsics, device=device, non_blocking=non_blocking))
 
 
-def create_trainer_engine(model, optimizer, loss_recon, loss_pose, loss_ib, xfrm_sampler, device=None, non_blocking=False):
+
+def create_trainer_engine(model, optimizer, sigma_scheme, mu_scheme, loss_recon, loss_pose, loss_ib, xfrm_sampler, device=None, non_blocking=False):
 
     if device:
         model.to(device)
 
     def _update(engine, batch):
         model.train()
-        im, depth, pose, masks, intrinsics = _prepare_batch(batch, device=device, non_blocking=non_blocking)
-        b, c, h, w = im.size()
-        # pose_xfrm = xfrm_sampler(b)
+        im, depth, v, masks, intrinsics = _prepare_batch(batch, device=device, non_blocking=non_blocking)
 
-        optimizer.zero_grad()
-        # im_pred, im_xfrmd_pred, pose_pred, mu, log_var = model(im, pose, pose_xfrm)
-        x_r, x_q = im.chunk(2, dim=0)
-        v_r, v_q = pose.chunk(2, dim=0)
-        pose_pred = model(x_r, v_r, x_q)
-        # loss_r = torch.exp(- loss_recon(im_pred*255, im*255))
-        # loss_p = loss_pose(pose_pred, pose)
-        # print(geo.get_pose_xfrm(pose_pred, pose))
-        # loss_i, *_ = loss_ib(pose_xfrm, im_pred, im_xfrmd_pred, depth, intrinsics)
-        # mu, logvar = pose_pred[1], pose_pred[2]
-        # aux2_mu, aux2_logvar = pose_pred[4], pose_pred[5]
-        # aux1_mu, aux1_logvar = pose_pred[7], pose_pred[8]
-        # kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-        # aux2_kld = -0.5 * torch.sum(1 + aux2_logvar - aux2_mu.pow(2) - aux2_logvar.exp())
-        # aux1_kld = -0.5 * torch.sum(1 + aux1_logvar - aux1_mu.pow(2) - aux1_logvar.exp())
-        # kld = (kld + aux2_kld + aux1_kld) / (im.size(0) * im.size(1) * im.size(2) * im.size(3))
-        # loss = loss_r + kld + 1 * loss_i + 1 * loss_p
-        loss = F.mse_loss(pose_pred, v_q)
+
+        orient = v[:, 3:]
+        sigma = next(sigma_scheme)
+        x_pred, ctxt_loss = model(im, orient, sigma)
+
+        # Log likelihood
+
+        ll = Normal(x_pred, sigma).log_prob(im)
+        likelihood = torch.mean(torch.sum(ll, dim=[1, 2, 3]))
+
+        loss_r = - likelihood
+        loss = torch.mean(ctxt_loss).abs() + loss_r
         loss.backward()
+
         optimizer.step()
-        loss_r = 0
+        optimizer.zero_grad()
+
         loss_p = 0
         loss_i = 0
-        kld = 0
+
+        with torch.no_grad():
+            # Anneal learning rate
+            mu = next(mu_scheme)
+            i = engine.state.iteration
+            for group in optimizer.param_groups:
+                group["lr"] = mu * math.sqrt(1 - 0.999 ** i) / (1 - 0.9 ** i)
         return {"loss": loss, "loss_recon": loss_r,
-                "loss_relative_pose": loss_p, "loss_reprojection": loss_i, "kld": kld}
+                "loss_relative_pose": loss_p, "loss_reprojection": loss_i, "kld": 0}
 
     engine = Engine(_update)
 
@@ -273,18 +277,18 @@ def create_trainer_engine(model, optimizer, loss_recon, loss_pose, loss_ib, xfrm
     return engine
 
 
-def normalize_angles(p):
-    x = p[..., 3:5] / p[..., 3:5].norm(2, dim=-1, keepdim=True)
-    y = p[..., 5:7] / p[..., 5:7].norm(2, dim=-1, keepdim=True)
-    z = p[..., 7:9] / p[..., 7:9].norm(2, dim=-1, keepdim=True)
+def normalize_angles(p, dims=((0, 1), (2, 3), (4, 5))):
+    x = p[..., dims[0][0]:dims[0][1]] / p[..., dims[0][0]:dims[0][1]].norm(2, dim=-1, keepdim=True)
+    y = p[..., dims[1][0]:dims[1][1]] / p[..., dims[1][0]:dims[1][1]].norm(2, dim=-1, keepdim=True)
+    z = p[..., dims[2][0]:dims[2][1]] / p[..., dims[2][0]:dims[2][1]].norm(2, dim=-1, keepdim=True)
     return torch.cat([p[..., 0:3], x, y, z], dim=-1)
 
 
-def continuous_to_euler(orient, degree=True):
+def continuous_to_euler(sine, cosine, degree=True):
     if degree:
-        return torch.asin(orient) * 180 / math.pi
+        return torch.atan2(sine, cosine) * 180 / math.pi
     else:
-        return torch.asin(orient)
+        return torch.atan2(sine, cosine)
 
 
 def create_evaluator_engine(model, loss_recon, loss_pose, loss_ib, xfrm_sampler, device=None, non_blocking=False):
@@ -294,40 +298,35 @@ def create_evaluator_engine(model, loss_recon, loss_pose, loss_ib, xfrm_sampler,
     def _inference(engine, batch):
         model.eval()
         with torch.no_grad():
-            batch_size = batch.get("im").size(0)
-            im, depth, pose, masks, intrinsics = _prepare_batch(batch, device=device, non_blocking=non_blocking)
-            b, c, h, w = im.size()
-            pose_xfrm = xfrm_sampler(b)
+            im, depth, v, masks, intrinsics = _prepare_batch(batch, device=device, non_blocking=non_blocking)
 
-            # im_pred, im_xfrmd_pred, pose_pred, mu, log_var = model(im, pose, pose_xfrm)
+            orient = v[:, 3:]
+            x_pred, ctxt_loss = model(im, orient)
 
-            x_r, x_q = im.chunk(2, dim=0)
-            v_r, v_q = pose.chunk(2, dim=0)
-            v_pred = model(x_r, v_r, x_q)
-            # loss_r = torch.exp(- loss_recon(im_pred*255, im*255))
-            # loss_p = loss_pose(pose_pred, pose)
-            # loss_i, *_ = loss_ib(pose_xfrm, im_pred, im_xfrmd_pred, depth, intrinsics)
-            # loss = loss_r + loss_p + loss_i
-            loss = F.mse_loss(v_pred, v_q)
+            loss = F.mse_loss(x_pred, im)
             loss_r = 0
             loss_p = 0
             loss_i = 0
-            _, pose_mean = batch.get("pose_mean").to(device).chunk(2, dim=0)
-            _, pose_std = batch.get("pose_std").to(device).chunk(2, dim=0)
-            v_pred = normalize_angles(v_pred) * pose_std + pose_mean
-            orient_pred = continuous_to_euler(torch.cat([v_pred[:, 3].unsqueeze(-1),
-                                                         v_pred[:, 5].unsqueeze(-1),
-                                                         v_pred[:, 7].unsqueeze(-1)], dim=-1))
-            v_pred_euler = torch.cat([v_pred[:, :3], orient_pred], dim=-1)
+            # pose_mean = batch.get("pose_mean").to(device)
+            # pose_std = batch.get("pose_std").to(device)
+            # orient_pred = torch.cat([continuous_to_euler(v_pred[:, 0], v_pred[:, 1]).unsqueeze(-1),
+            #                          continuous_to_euler(v_pred[:, 2], v_pred[:, 3]).unsqueeze(-1),
+            #                          continuous_to_euler(v_pred[:, 4], v_pred[:, 5]).unsqueeze(-1)]
+            #                         , dim=-1)
+            # v_pred_euler = torch.cat([v_pred[:, :3], orient_pred], dim=-1)
+            # v_pred_euler = orient_pred
+            # orient_q = torch.cat([continuous_to_euler(v[:, 3], v[:, 4]).unsqueeze(-1),
+            #                       continuous_to_euler(v[:, 5], v[:, 6]).unsqueeze(-1),
+            #                       continuous_to_euler(v[:, 7], v[:, 8]).unsqueeze(-1)]
+            #                      , dim=-1)
 
-            orient_q = continuous_to_euler(torch.cat([v_q[:, 3].unsqueeze(-1),
-                                                      v_q[:, 5].unsqueeze(-1),
-                                                      v_q[:, 7].unsqueeze(-1)], dim=-1))
-            v_q_euler = torch.cat([v_q[:, :3], orient_q], dim=-1)
-            v_difference = (v_pred_euler - v_q_euler).abs()
-            v_difference = torch.where(torch.isnan(v_difference), torch.zeros_like(v_difference), v_difference)
+            # v_q_euler = torch.cat([v[:, :3], orient_q], dim=-1)
+            # v_q_euler = orient_q
+
+            # v_difference = (v_pred_euler - v_q_euler).add(180).fmod(360).abs().add(-180).abs()
+            # v_difference = torch.where(torch.isnan(v_difference), torch.zeros_like(v_difference), v_difference)
             return {"loss": loss, "loss_recon": loss_r, "loss_relative_pose": loss_p,
-                    "loss_reprojection": loss_i, "pose_difference": v_difference}
+                    "loss_reprojection": loss_i, "pose_difference": 0.0}
 
     engine = Engine(_inference)
 
@@ -336,8 +335,8 @@ def create_evaluator_engine(model, loss_recon, loss_pose, loss_ib, xfrm_sampler,
     RunningAverage(output_transform=lambda x: x["loss_recon"]).attach(engine, "reconstruction_loss")
     RunningAverage(output_transform=lambda x: x["loss_relative_pose"]).attach(engine, "relative_pose_loss")
     RunningAverage(output_transform=lambda x: x["loss_reprojection"]).attach(engine, "reprojection_loss")
-    EpochAverage(output_transform=lambda x: x["loss"]).attach(engine, "avg_error")
-    EpochAverage(output_transform=lambda x: x["pose_difference"]).attach(engine, "avg_pose")
-    EpochMax(output_transform=lambda x: x["pose_difference"]).attach(engine, "max_pose")
+    # EpochAverage(output_transform=lambda x: x["loss"]).attach(engine, "avg_error")
+    # EpochAverage(output_transform=lambda x: x["pose_difference"]).attach(engine, "avg_pose")
+    # EpochMax(output_transform=lambda x: x["pose_difference"]).attach(engine, "max_pose")
     return engine
 
