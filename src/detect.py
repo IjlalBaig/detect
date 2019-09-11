@@ -5,13 +5,15 @@ import random
 import torch
 import torch.nn as nn
 import math
+import kornia
+import os
 from torch.utils.data import Subset, DataLoader
 from torchvision.utils import make_grid
 import torch.nn.functional as F
-from src.test import Tower, resnet, contextnet
+from src.test import Tower, resnet, contextnet, Discriminator
 from torch.distributions import Normal
 from torch.optim.lr_scheduler import StepLR
-from pytorch_msssim import SSIM
+from pytorch_msssim import SSIM, MS_SSIM
 from src.utils import Annealer
 
 from tensorboardX import SummaryWriter
@@ -43,30 +45,82 @@ if cuda:
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
+def test(batch_sizes, data_dir, log_dir, fractions, workers, use_gpu, standardize=False):
+
+    device = "cuda" if torch.cuda.is_available() and use_gpu else "cpu"
+
+    train_loader, _, test_loader = get_data_loaders(dpath=data_dir, fractions=fractions, im_mode="L",
+                                                   batch_sizes=batch_sizes, num_workers=workers,
+                                                   im_dims=(64, 64), standardize=standardize)
+
+    model = contextnet(2)
+
+    # init checkpoint handler
+    model_name = model.__class__.__name__
+    checkpoint_handler = ModelCheckpoint(dpath=log_dir, filename_prefix=model_name, n_saved=3)
+
+    # ssim_loss = nn.MSELoss()
+    ssim_loss = SSIM(win_size=11, data_range=1., size_average=True, channel=1)
+    pose_xfrm_loss = TransformationLoss()
+    ib_loss = InductiveBiasLoss()
+    # ssim_loss = FeatureLoss(device)
+
+    pose_xfrm_sampler = PoseTransformSampler(device=device)
+    evaluator_engine = create_evaluator_engine(model, loss_recon=ssim_loss, loss_pose=pose_xfrm_loss,
+                                               loss_ib=ib_loss, xfrm_sampler=pose_xfrm_sampler, device=device)
+    writer = SummaryWriter(log_dir=os.path.join(log_dir, "test"))
+
+    # load checkpoint
+    checkpoint_dict = checkpoint_handler.load_checkpoint()
+    if checkpoint_dict:
+        model.load_state_dict(checkpoint_dict.get("model"))
+        model.eval()
+
+    # evaluate
+    for i, batch in enumerate(test_loader):
+        with torch.no_grad():
+            im, depth, v, masks, intrinsics = _prepare_batch(batch, device=device, non_blocking=True)
+            orient = v[:, 3:5]
+
+            x_pred, _ = model(im, orient)
+
+            # send to cpu
+            im = im.detach().cpu().float()
+            im_pred = x_pred.detach().cpu().float()
+            writer.add_image("ground truth", make_grid(im), i)
+            writer.add_image("reconstruction", make_grid(im_pred), i)
+
+    writer.close()
+
 
 def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu, standardize=False):
     device = "cuda" if torch.cuda.is_available() and use_gpu else "cpu"
 
     train_loader, val_loader, _ = get_data_loaders(dpath=data_dir, fractions=fractions, im_mode="L",
                                                    batch_sizes=batch_sizes, num_workers=workers,
-                                                   im_dims=(128, 128), standardize=standardize)
+                                                   im_dims=(64, 64), standardize=standardize)
 
     # create model and optimizer
     # model = resnet()
-    model = contextnet(6)
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    model = contextnet(2)
+    model_disc = Discriminator()
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.00005)
+    optimizer_disc = torch.optim.Adam(model_disc.parameters(), lr=0.001)
+
     # ssim_loss = nn.MSELoss()
-    ssim_loss = SSIM(win_size=11, win_sigma=1.5, data_range=255, size_average=True, channel=1)
+    ssim_loss = SSIM(win_size=11, data_range=1., size_average=True, channel=1)
     pose_xfrm_loss = TransformationLoss()
     ib_loss = InductiveBiasLoss()
     # ssim_loss = FeatureLoss(device)
 
     pose_xfrm_sampler = PoseTransformSampler(device=device)
 
-    sigma_scheme = Annealer(2.0, 0.7, 80000)
-    mu_scheme = Annealer(5 * 10 ** (-6), 5 * 10 ** (-6), 1.6 * 10 ** 5)
+    sigma_scheme = Annealer(2.0, 0.7, 10000)
+    mu_scheme = Annealer(5 * 10 ** (-5), 5 * 10 ** (-7), 40000)
     # create engines
-    trainer_engine = create_trainer_engine(model, optimizer, sigma_scheme, mu_scheme, loss_recon=ssim_loss, loss_pose=pose_xfrm_loss,
+    trainer_engine = create_trainer_engine(model, optimizer, model_disc, optimizer, sigma_scheme, mu_scheme,
+                                           loss_recon=ssim_loss, loss_pose=pose_xfrm_loss,
                                            loss_ib=ib_loss, xfrm_sampler=pose_xfrm_sampler, device=device)
     evaluator_engine = create_evaluator_engine(model, loss_recon=ssim_loss, loss_pose=pose_xfrm_loss,
                                                loss_ib=ib_loss, xfrm_sampler=pose_xfrm_sampler, device=device)
@@ -81,7 +135,7 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu,
 
     # define progress bar
     pbar = ProgressBar()
-    metric_names = ["cumulative_loss", "reconstruction_loss", "relative_pose_loss", "reprojection_loss", "kld"]
+    metric_names = ["loss", "mse", "mu", "sigma"]
     pbar.attach(trainer_engine, metric_names=metric_names)
 
     # tensorboard --logdir=log --host=127.0.0.1
@@ -91,9 +145,17 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu,
         checkpoint_dict = checkpoint_handler.load_checkpoint()
         if checkpoint_dict:
             model.load_state_dict(checkpoint_dict.get("model"))
+            optimizer.load_state_dict(checkpoint_dict.get("optimizer"))
             model.eval()
+            model_disc.load_state_dict(checkpoint_dict.get("model_disc"))
+            optimizer_disc.load_state_dict(checkpoint_dict.get("optimizer_disc"))
+            model_disc.eval()
             engine.state.epoch = checkpoint_dict.get("epoch")
             engine.state.iteration = checkpoint_dict.get("iteration")
+            tmp = checkpoint_dict.get("sigma_scheme", {})
+            sigma_scheme.data = {"s": tmp["s"], "recent": tmp["recent"]}
+            tmp = checkpoint_dict.get("mu_scheme", {})
+            mu_scheme.data = {"s": tmp["s"], "recent": tmp["recent"]}
 
     @trainer_engine.on(Events.ITERATION_COMPLETED)
     def log_training_metrics(engine):
@@ -102,8 +164,12 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu,
 
     @trainer_engine.on(Events.EPOCH_COMPLETED)
     def log_checkpoint(engine):
-        checkpoint_dict = {"model": model.state_dict(), "optimizer": optimizer.state_dict(),
-                           "epoch": engine.state.epoch, "iteration": engine.state.iteration}
+        checkpoint_dict = {"model": model.state_dict(),
+                           "optimizer": optimizer.state_dict(),
+                           "model_disc": model_disc.state_dict(),
+                           "optimizer_disc": optimizer_disc.state_dict(),
+                           "epoch": engine.state.epoch, "iteration": engine.state.iteration,
+                           "sigma_scheme": sigma_scheme.data, "mu_scheme": mu_scheme.data}
         checkpoint_handler.save_checkpoint(checkpoint_dict)
 
     @trainer_engine.on(Events.EPOCH_COMPLETED)
@@ -113,12 +179,10 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu,
         with torch.no_grad():
             im, depth, v, masks, intrinsics = _prepare_batch(batch, device=device, non_blocking=True)
             b, c, h, w = im.size()
-            pose_xfrm = pose_xfrm_sampler(b)
-            # im_pred, im_xfrmd_pred, pose_pred, mu, log_var = model(im, pose, pose_xfrm)
-            # pose_pred = model(im, pose)
-            # print((pose - pose_pred[0])[:2, :])
-            orient = v[:, 3:]
-            x_pred, ctxt_loss = model(im, orient)
+
+            orient = v[:, 3:5]
+
+            x_pred, _ = model(im, orient)
             # _, im_pred_geo, im_xfrmd_pred = ib_loss(pose_xfrm, im_pred, im_xfrmd_pred, depth, intrinsics)
 
             # send to cpu
@@ -184,7 +248,7 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu,
 
 
 def get_data_loaders(dpath, fractions=(0.7, 0.2, 0.1), batch_sizes=(12, 12, 1),
-                     im_dims=(128, 128), im_mode="L", num_workers=4, standardize=False):
+                     im_dims=(64, 64), im_mode="L", num_workers=4, standardize=False):
 
     dataset = EnvironmentDataset(dpath=dpath, im_dims=im_dims,
                                  im_mode=im_mode, standardize=standardize)
@@ -226,32 +290,49 @@ def _prepare_batch(batch, device=None, non_blocking=False):
             convert_tensor(intrinsics, device=device, non_blocking=non_blocking))
 
 
-
-def create_trainer_engine(model, optimizer, sigma_scheme, mu_scheme, loss_recon, loss_pose, loss_ib, xfrm_sampler, device=None, non_blocking=False):
+def create_trainer_engine(model, optimizer, model_disc, optimizer_disc, sigma_scheme, mu_scheme, loss_recon, loss_pose, loss_ib, xfrm_sampler, device=None, non_blocking=False):
 
     if device:
         model.to(device)
+        model_disc.to(device)
+
+    def alter_sample(orient):
+        x = torch.zeros_like(orient)
+        x[:, 2:] = orient[:, 2:]
+        x[:, 0] = torch.asin(orient[:, 0]) + 0.1 * torch.randn_like(orient[:, 0])
+        x[:, 1] = torch.cos(x[:, 0])
+        x[:, 0] = torch.sin(x[:, 0])
+        return x
 
     def _update(engine, batch):
         model.train()
-        im, depth, v, masks, intrinsics = _prepare_batch(batch, device=device, non_blocking=non_blocking)
+
+        x, d, v, masks, intrinsics = _prepare_batch(batch, device=device, non_blocking=non_blocking)
+        orient = v[:, 3:5]
+        # sigma = next(sigma_scheme)
+        sigma = 1.0
+        x_pred, elbo = model(x, orient)
+
+        dl_pred, d_pred = model_disc(x_pred, orient)
+        dl_original, d_original = model_disc(x, orient)
+
+        loss_glld = - torch.mean(torch.sum(Normal(x_pred, sigma).log_prob(x), dim=[1, 2, 3]))
+        loss_llld = - torch.mean(torch.sum(Normal(dl_pred, sigma).log_prob(dl_original), dim=[1, 2, 3]))
+        loss_disc = torch.mean(-(torch.log(d_original) + 0.5 * (torch.log(1 - d_pred))))
+
+        ib_loss = loss_ib()
+
+        loss_decoder = 0.01 * loss_llld + loss_glld
 
 
-        orient = v[:, 3:]
-        sigma = next(sigma_scheme)
-        x_pred, ctxt_loss = model(im, orient, sigma)
 
-        # Log likelihood
-
-        ll = Normal(x_pred, sigma).log_prob(im)
-        likelihood = torch.mean(torch.sum(ll, dim=[1, 2, 3]))
-
-        loss_r = - likelihood
-        loss = torch.mean(ctxt_loss).abs() + loss_r
-        loss.backward()
-
-        optimizer.step()
         optimizer.zero_grad()
+        loss_decoder.backward(retain_graph=True)
+        optimizer.step()
+
+        optimizer_disc.zero_grad()
+        loss_disc.backward()
+        optimizer_disc.step()
 
         loss_p = 0
         loss_i = 0
@@ -262,17 +343,21 @@ def create_trainer_engine(model, optimizer, sigma_scheme, mu_scheme, loss_recon,
             i = engine.state.iteration
             for group in optimizer.param_groups:
                 group["lr"] = mu * math.sqrt(1 - 0.999 ** i) / (1 - 0.9 ** i)
-        return {"loss": loss, "loss_recon": loss_r,
-                "loss_relative_pose": loss_p, "loss_reprojection": loss_i, "kld": 0}
+
+        return {"loss": loss_decoder, "mse": F.mse_loss(x_pred, im),
+                "loss_relative_pose": loss_llld, "loss_reprojection": loss_disc,
+                "mu": loss_disc, "sigma": elbo}
 
     engine = Engine(_update)
 
     # add metrics
-    RunningAverage(output_transform=lambda x: x["loss"]).attach(engine, "cumulative_loss")
-    RunningAverage(output_transform=lambda x: x["loss_recon"]).attach(engine, "reconstruction_loss")
-    RunningAverage(output_transform=lambda x: x["loss_relative_pose"]).attach(engine, "relative_pose_loss")
-    RunningAverage(output_transform=lambda x: x["loss_reprojection"]).attach(engine, "reprojection_loss")
-    RunningAverage(output_transform=lambda x: x["kld"]).attach(engine, "kld")
+    RunningAverage(output_transform=lambda x: x["loss"]).attach(engine, "loss")
+    RunningAverage(output_transform=lambda x: x["mse"]).attach(engine, "mse")
+    RunningAverage(output_transform=lambda x: x["mu"]).attach(engine, "mu")
+    RunningAverage(output_transform=lambda x: x["sigma"]).attach(engine, "sigma")
+
+    # RunningAverage(output_transform=lambda x: x["loss_relative_pose"]).attach(engine, "relative_pose_loss")
+    # RunningAverage(output_transform=lambda x: x["loss_reprojection"]).attach(engine, "reprojection_loss")
 
     return engine
 
@@ -300,11 +385,11 @@ def create_evaluator_engine(model, loss_recon, loss_pose, loss_ib, xfrm_sampler,
         with torch.no_grad():
             im, depth, v, masks, intrinsics = _prepare_batch(batch, device=device, non_blocking=non_blocking)
 
-            orient = v[:, 3:]
-            x_pred, ctxt_loss = model(im, orient)
+            orient = v[:, 3:5]
+            x_pred, _ = model(im, orient)
+            # Adversarial loss
 
             loss = F.mse_loss(x_pred, im)
-            loss_r = 0
             loss_p = 0
             loss_i = 0
             # pose_mean = batch.get("pose_mean").to(device)
@@ -325,16 +410,16 @@ def create_evaluator_engine(model, loss_recon, loss_pose, loss_ib, xfrm_sampler,
 
             # v_difference = (v_pred_euler - v_q_euler).add(180).fmod(360).abs().add(-180).abs()
             # v_difference = torch.where(torch.isnan(v_difference), torch.zeros_like(v_difference), v_difference)
-            return {"loss": loss, "loss_recon": loss_r, "loss_relative_pose": loss_p,
+            return {"loss": loss, "mse": loss, "loss_relative_pose": loss_p,
                     "loss_reprojection": loss_i, "pose_difference": 0.0}
 
     engine = Engine(_inference)
 
     # add metrics
-    RunningAverage(output_transform=lambda x: x["loss"]).attach(engine, "cumulative_loss")
-    RunningAverage(output_transform=lambda x: x["loss_recon"]).attach(engine, "reconstruction_loss")
-    RunningAverage(output_transform=lambda x: x["loss_relative_pose"]).attach(engine, "relative_pose_loss")
-    RunningAverage(output_transform=lambda x: x["loss_reprojection"]).attach(engine, "reprojection_loss")
+    RunningAverage(output_transform=lambda x: x["loss"]).attach(engine, "loss")
+    RunningAverage(output_transform=lambda x: x["mse"]).attach(engine, "mse")
+    # RunningAverage(output_transform=lambda x: x["loss_relative_pose"]).attach(engine, "relative_pose_loss")
+    # RunningAverage(output_transform=lambda x: x["loss_reprojection"]).attach(engine, "reprojection_loss")
     # EpochAverage(output_transform=lambda x: x["loss"]).attach(engine, "avg_error")
     # EpochAverage(output_transform=lambda x: x["pose_difference"]).attach(engine, "avg_pose")
     # EpochMax(output_transform=lambda x: x["pose_difference"]).attach(engine, "max_pose")

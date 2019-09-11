@@ -20,6 +20,16 @@ def conv1x1(in_planes, out_planes, stride=1):
     return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
 
 
+class Flatten(nn.Module):
+
+    def __init__(self):
+        super(Flatten, self).__init__()
+
+    def forward(self, x):
+        shape = torch.prod(torch.tensor(x.shape[1:])).item()
+        return x.view(-1, shape)
+
+
 class BasicBlock(nn.Module):
     expansion = 1
 
@@ -252,6 +262,36 @@ class Tower(nn.Module):
         return r
 
 
+class Conv2dLSTMCell(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
+        super(Conv2dLSTMCell, self).__init__()
+
+        kwargs = dict(kernel_size=kernel_size, stride=stride, padding=padding)
+
+        in_channels += out_channels
+
+        self.forget = nn.Conv2d(in_channels, out_channels, **kwargs)
+        self.input = nn.Conv2d(in_channels, out_channels, **kwargs)
+        self.output = nn.Conv2d(in_channels, out_channels, **kwargs)
+        self.state = nn.Conv2d(in_channels, out_channels, **kwargs)
+
+    def forward(self, input, states):
+        (cell, hidden) = states
+        input = torch.cat((hidden, input), dim=1)
+
+        forget_gate = torch.sigmoid(self.forget(input))
+        input_gate = torch.sigmoid(self.input(input))
+        output_gate = torch.sigmoid(self.output(input))
+        state_gate = torch.tanh(self.state(input))
+
+        # Update internal cell state
+        cell = forget_gate * cell + input_gate * state_gate
+        hidden = output_gate * torch.tanh(cell)
+
+        return cell, hidden
+
+
+
 def resnet(z_dim=9):
     """Constructs a ResNet-18 model.
 
@@ -259,7 +299,8 @@ def resnet(z_dim=9):
         pretrained (bool): If True, returns a model pre-trained on ImageNet
         progress (bool): If True, displays a progress bar of the download to stderr
     """
-    return ResNet(BasicBlock, [3, 4, 6, 3], z_dim=z_dim)
+    return ResNet(BasicBlock, [2, 2, 2, 2], z_dim=z_dim)
+
 
 class ContextNet(nn.Module):
     def __init__(self, block, layers, trans_block, trans_layers, num_classes=1024,
@@ -271,7 +312,7 @@ class ContextNet(nn.Module):
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
         self._norm_layer = norm_layer
-
+        self.drop = nn.Dropout2d(0.2)
         self.inplanes = 64
         self.dilation = 1
         if replace_stride_with_dilation is None:
@@ -299,9 +340,7 @@ class ContextNet(nn.Module):
         self.layer4 = self._make_layer(block, 512, layers[3], stride=2,
                                        dilate=replace_stride_with_dilation[2])
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc1 = nn.Linear(512 * block.expansion, num_classes)
-        self.fc2 = nn.Linear(num_classes, 1024)
-        self.fc3 = nn.Linear(1024, v_dim)
+        self.fc = nn.Linear(512 * block.expansion, v_dim)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -322,14 +361,17 @@ class ContextNet(nn.Module):
                 elif isinstance(m, TransBasicBlock):
                     nn.init.constant_(m.bn2.weight, 0)
 
-        self.inplanes = 256
+        self.inplanes = 64
         # Decoder Section
-        self.trans_layer1 = self._make_transpose(trans_block, 256, trans_layers[0], stride=2)
-        self.trans_layer2 = self._make_transpose(trans_block, 128, trans_layers[1], stride=2)
-        self.trans_layer3 = self._make_transpose(trans_block, 64, trans_layers[2], stride=1)
-        self.trans_layer4 = self._make_transpose(trans_block, 1, trans_layers[3], stride=1)
+        self.fc_d = nn.Sequential(
+            nn.Linear(v_dim, 1024)
+        )
+        self.trans_layer1 = self._make_transpose(trans_block, 512, trans_layers[0], stride=2)
+        self.trans_layer2 = self._make_transpose(trans_block, 256, trans_layers[1], stride=2)
+        self.trans_layer3 = self._make_transpose(trans_block, 128, trans_layers[2], stride=2)
+        self.trans_layer4 = self._make_transpose(trans_block, 64, trans_layers[3], stride=2)
 
-        # self.final_deconv = nn.ConvTranspose2d(64, 1, kernel_size=2, stride=2, padding=0, bias=True)
+        self.final_deconv = nn.ConvTranspose2d(64, 1, kernel_size=3, stride=1, padding=1, bias=True)
 
     def _make_layer(self, block, planes, blocks, stride=1, dilate=False):
         norm_layer = self._norm_layer
@@ -381,6 +423,13 @@ class ContextNet(nn.Module):
 
         return nn.Sequential(*layers)
 
+    @staticmethod
+    def reparameterize(mu, log_var):
+        std = torch.exp(0.5*log_var)
+        eps = torch.randn_like(std)
+        z = mu + eps*std
+        return z
+
     def forward_encode(self, x):
         x = self.conv1(x)
         x = self.bn1(x)
@@ -393,13 +442,9 @@ class ContextNet(nn.Module):
         x = self.layer4(x)
 
         x = self.avgpool(x)
-        b = x.size(0)
-        x = x.reshape(b, -1)
-        x = F.relu(self.fc1(x))
-        # c = self.context(torch.ones(b, 1, device=x.device))
-        # x = torch.cat([x, c], dim=1)
-        x = F.relu(self.fc2(x))
-        x = self.fc3(x)
+        x = x.reshape(x.size(0), -1)
+        x = self.fc(x)
+        return x
 
     def forward_context(self, x, v):
         # current scene representation
@@ -414,69 +459,75 @@ class ContextNet(nn.Module):
         return ctxt.repeat(b, 1, 1, 1), ctxt_err
 
     def forward(self, x, v, sigma=0.01):
-        ctxt, ctxt_err = self.forward_context(x, v)
-        x_g = self.forward_decode(v, ctxt)
+        # ctxt, ctxt_err = self.forward_context(x, v)
+        v = self.forward_encode(x)
 
-        # ELBO likelihood contribution update
-        elbo = torch.sum(Normal(x_g, sigma).log_prob(x), dim=[1, 2, 3])
-        return x_g, elbo
+        x = self.forward_decode(v)
+        return x
 
-    def forward_decode(self, v, ctxt):
-        v = v.view(v.size(0), -1, 1, 1).repeat(1, 1, ctxt.size(-2), ctxt.size(-1))
+    def forward_decode(self, v):
 
-        x = self.conv2(torch.cat([ctxt, v], dim=1))
+        # mu, log_var = torch.chunk(self.fc_d(v), 2, dim=1)
+        # std = log_var.mul(0.5).exp_()
+        # x = self.reparameterize(mu, log_var)
+        # q = Normal(mu, std)
+        # p = Normal(torch.zeros_like(mu), 0.1)
+        # elbo = torch.mean(torch.sum(kl_divergence(p, q), dim=[1]))
+        x = self.fc_d(v)
+        x = x.view(-1, 64, 4, 4)
         x = self.trans_layer1(x)
         x = self.trans_layer2(x)
         x = self.trans_layer3(x)
         x = self.trans_layer4(x)
-        # print(x.shape)
-        # x = self.final_deconv(x)
-        return x
+        x = self.final_deconv(x)
+
+        return x, 0.0
 
 
-class AdversarialDecoder(nn.Module):
-    def __init__(self, v_dim=6):
-        super(AdversarialDecoder, self).__init__()
-
-        self.model = nn.Sequential(
-            *self.block(v_dim, 128, normalize=False),
-            *self.block(128, 256),
-            *self.block(256, 512),
-            *self.block(512, 1024),
-            nn.Linear(1024, 4096),
+class Discriminator(nn.Module):
+    def __init__(self, v_dim=2):
+        super(Discriminator, self).__init__()
+        self.v_dim = v_dim
+        self.convs = nn.Sequential(
+            nn.Conv2d(1, 32, kernel_size=5, stride=1, padding=2),
+            nn.ReLU(),
+            nn.Conv2d(32, 256, kernel_size=5, stride=2, padding=2),
+            # nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.Conv2d(256, 256, kernel_size=5, stride=2, padding=2),
+            # nn.BatchNorm2d(256),
+            nn.ReLU(),
+            nn.Conv2d(256, 256, kernel_size=5, stride=2, padding=2),
+            # nn.BatchNorm2d(256),
+            nn.ReLU(),
+            nn.Conv2d(256, 256, kernel_size=5, stride=2, padding=2),
+        )
+        self.flatten = Flatten()
+        self.fc_merge = nn.Sequential(
+            nn.Linear(4096 + self.v_dim, 1024),
             nn.ReLU()
         )
-
-    def block(self, in_feat, out_feat, normalize=True):
-        layers = [nn.Linear(in_feat, out_feat)]
-        if normalize:
-            layers.append(nn.BatchNorm1d(out_feat, 0.8))
-        layers.append(nn.LeakyReLU(0.2, inplace=True))
-        return layers
-
-    def forward(self, v):
-        x = self.model(v)
-        x = x.view(-1, 1, 64, 64)
-        return x
-
-
-class AdversarialCritic(nn.Module):
-    def __init__(self):
-        super(AdversarialCritic, self).__init__()
-        self.model = nn.Sequential(
-            nn.Linear(4096, 512),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(512, 256),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(256, 1),
+        self.fc = nn.Sequential(
+            nn.Linear(1024, 512),
+            # nn.BatchNorm1d(512, momentum=0.9),
+            nn.ReLU(),
+            nn.Linear(512, 1),
+            nn.Sigmoid()
         )
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.xavier_normal_(m.weight, nn.init.calculate_gain('sigmoid'))
 
-    def forward(self, x):
-        x = x.view(-1, 4096)
-        validity = self.model(x)
-        return validity
-
-
+    def forward(self, x, v):
+        x = self.convs(x)
+        x_merge = self.flatten(x)
+        x_merge = self.fc_merge(torch.cat([x_merge, v], dim=1))
+        return x, self.fc(x_merge)
 
 
 class RedNet(nn.Module):

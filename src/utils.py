@@ -11,11 +11,21 @@ class Annealer(object):
         self.delta = delta
         self.steps = steps
         self.s = 0
-        self.data = self.__repr__()
         self.recent = init
 
+    @property
+    def data(self):
+            return self.__repr__()
+
+    @data.setter
+    def data(self, kwargs):
+        for key, value in kwargs.items():
+            if key in self.__dict__:
+                self.__setattr__(key, value)
+
     def __repr__(self):
-        return {"init": self.init, "delta": self.delta, "steps": self.steps, "s": self.s}
+        return {"init": self.init, "delta": self.delta,
+                "steps": self.steps, "s": self.s, "recent": self.recent}
 
     def __iter__(self):
         return self
