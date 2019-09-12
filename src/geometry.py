@@ -98,7 +98,7 @@ def world_2_cam_xfrm(trans):
     return trans.index_select(1, torch.tensor([0, 2, 1, 3, 4, 6, 5], device=trans.device).long())
 
 
-def transform_points(points, trans):
+def transform_points(points, trans, orient_mode="quaternion"):
     """Apply pose transformation [x, y, z, q0, q1, q2, q3] to a cam_coordinates.
         The quaternion should be in (w, x, y, z) format.
         Args:
@@ -108,8 +108,13 @@ def transform_points(points, trans):
             torch.Tensor: the transformation matrix of shape :math:`(*, 4, 4)`."""
     b, h, w, _ = points.shape
     points = points.view(b, h*w, 3)
-    trans_cam = world_2_cam_xfrm(trans)
-    trans_matrix = qtvec_to_transformation_matrix(trans_cam)
+    if orient_mode == "quaternion":
+        trans_cam = world_2_cam_xfrm(trans)
+        trans_matrix = qtvec_to_transformation_matrix(trans_cam)
+    elif orient_mode == "sc_euler":
+        # todo:
+        # convert euler to rotation matrix
+        pass
     points_transformed = kornia.transform_points(trans_matrix, points)
     return points_transformed.view(b, h, w, 3)
 

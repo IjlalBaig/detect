@@ -8,30 +8,71 @@ import kornia
 from math import pi
 from pytorch_msssim import SSIM
 
+
 class PoseTransformSampler(nn.Module):
-    """Samples a pose transformation.
-        Args:
-            variance (tuple): a tuple containing variance of dimensions (translation, angle).
-        Return:
-            torch.Tensor: the pose transform of shape :math:`(*, 7)`, representing translation (x, y, z) and
-            quaternion orientation (w, x, y, z) transform.
-        """
-    def __init__(self, device, variance=(0.1, 0.05)):
+    def __init__(self, pos_var=0.1, orient_var=pi/36, pos_mode='XYZ', orient_mode='XYZ'):
         super(PoseTransformSampler, self).__init__()
-        self.device = device
-        self.transl_variance = variance[0]
-        self.orient_variance = variance[1]
+        self.pos_var = pos_var
+        self.pos_mode = pos_mode
+        self.orient_var = orient_var
+        self.orient_mode = orient_mode
 
+    def xfrm_orient(self, orient, mode='XYZ'):
+        xfrm = torch.zeros_like(orient)
+        if 'X' in mode:
+            xfrm_euler = self.orient_var * torch.randn_like(orient[:, 0])
+            orient_euler = torch.atan2(orient[:, 0], orient[:, 1]) + xfrm_euler
 
-    def forward(self, b):
-        transl = (-2 * self.transl_variance) * torch.rand(b, 3, device=self.device) + self.transl_variance
-        orient_axis = torch.rand(b, 3, device=self.device)
-        axis_rotation = torch.ones(b, 1, device=self.device).uniform_(1.0 - self.orient_variance, 1.0)
-        orient = torch.cat([axis_rotation, orient_axis], dim=1)
-        quaternion = orient
-        quaternion[:, 1:] = orient[:, 1:] * (1. - orient[:, 0].unsqueeze(-1)**2).sqrt() *\
-                            (1 / orient[:, 1:].norm(dim=1).unsqueeze(-1))
-        return torch.cat([transl, quaternion], dim=1)
+            orient[:, 0] = torch.sin(orient_euler)
+            orient[:, 1] = torch.cos(orient_euler)
+            xfrm[:, 0] = torch.sin(xfrm_euler)
+            xfrm[:, 1] = torch.cos(xfrm_euler)
+
+        if 'Y' in mode:
+            xfrm_euler = self.orient_var * torch.randn_like(orient[:, 2])
+            orient_euler = torch.atan2(orient[:, 2], orient[:, 3]) + xfrm_euler
+
+            orient[:, 2] = torch.sin(orient_euler)
+            orient[:, 3] = torch.cos(orient_euler)
+            xfrm[:, 2] = torch.sin(xfrm_euler)
+            xfrm[:, 3] = torch.cos(xfrm_euler)
+
+        if 'Z' in mode:
+            xfrm_euler = self.orient_var * torch.randn_like(orient[:, 4])
+            orient_euler = torch.atan2(orient[:, 4], orient[:, 5]) + xfrm_euler
+
+            orient[:, 4] = torch.sin(orient_euler)
+            orient[:, 5] = torch.cos(orient_euler)
+            xfrm[:, 4] = torch.sin(xfrm_euler)
+            xfrm[:, 5] = torch.cos(xfrm_euler)
+        return orient, xfrm
+
+    def xfrm_pos(self, pos, mode='XYZ'):
+        xfrm = torch.zeros_like(pos)
+        if 'X' in mode:
+            xfrm[:, 0] = self.pos_var * torch.randn_like(pos[:, 0])
+            pos[:, 0] = pos[:, 0] + xfrm[:, 0]
+
+        if 'Y' in mode:
+            xfrm[:, 1] = self.pos_var * torch.randn_like(pos[:, 1])
+            pos[:, 1] = pos[:, 1] + xfrm[:, 1]
+
+        if 'Z' in mode:
+            xfrm[:, 2] = self.pos_var * torch.randn_like(pos[:, 2])
+            pos[:, 2] = pos[:, 2] + xfrm[:, 2]
+        return pos, xfrm
+
+    def forward(self, v):
+        v_xfrm = torch.zeros_like(v)
+        pos_len = len(self.pos_mode)
+        if pos_len > 0:
+            v[:, 0:pos_len], v_xfrm[:, 0:pos_len] = self.xfrm_pos(v[:, 0:pos_len], mode=self.pos_mode)
+
+        orient_len = len(self.orient_mode)
+        if orient_len > 0:
+            v[:, pos_len: pos_len + orient_len * 2], v_xfrm[:, pos_len: pos_len + orient_len * 2] = \
+                self.xfrm_orient(v[:, pos_len: pos_len + orient_len * 2], mode=self.orient_mode)
+        return v, v_xfrm
 
 
 class TransformationLoss(nn.Module):

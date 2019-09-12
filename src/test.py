@@ -458,12 +458,14 @@ class ContextNet(nn.Module):
         ctxt_err = F.mse_loss(ctxt, r)
         return ctxt.repeat(b, 1, 1, 1), ctxt_err
 
-    def forward(self, x, v, sigma=0.01):
-        # ctxt, ctxt_err = self.forward_context(x, v)
-        v = self.forward_encode(x)
-
-        x = self.forward_decode(v)
-        return x
+    def forward(self, x=None, v=None, sigma=0.01):
+        if x is not None:
+            v = self.forward_encode(x)
+            x = self.forward_decode(v)
+            return x, v
+        if v is not None:
+            x = self.forward_decode(v)
+            return x, v
 
     def forward_decode(self, v):
 

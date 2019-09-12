@@ -114,16 +114,16 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu,
     ib_loss = InductiveBiasLoss()
     # ssim_loss = FeatureLoss(device)
 
-    pose_xfrm_sampler = PoseTransformSampler(device=device)
+    pose_xfrmer = PoseTransformSampler()
 
     sigma_scheme = Annealer(2.0, 0.7, 10000)
     mu_scheme = Annealer(5 * 10 ** (-5), 5 * 10 ** (-7), 40000)
     # create engines
     trainer_engine = create_trainer_engine(model, optimizer, model_disc, optimizer, sigma_scheme, mu_scheme,
                                            loss_recon=ssim_loss, loss_pose=pose_xfrm_loss,
-                                           loss_ib=ib_loss, xfrm_sampler=pose_xfrm_sampler, device=device)
+                                           loss_ib=ib_loss, xfrm_sampler=pose_xfrmer, device=device)
     evaluator_engine = create_evaluator_engine(model, loss_recon=ssim_loss, loss_pose=pose_xfrm_loss,
-                                               loss_ib=ib_loss, xfrm_sampler=pose_xfrm_sampler, device=device)
+                                               loss_ib=ib_loss, xfrm_sampler=pose_xfrmer, device=device)
 
     # init checkpoint handler
     model_name = model.__class__.__name__
@@ -290,63 +290,86 @@ def _prepare_batch(batch, device=None, non_blocking=False):
             convert_tensor(intrinsics, device=device, non_blocking=non_blocking))
 
 
-def create_trainer_engine(model, optimizer, model_disc, optimizer_disc, sigma_scheme, mu_scheme, loss_recon, loss_pose, loss_ib, xfrm_sampler, device=None, non_blocking=False):
+def create_trainer_engine(model, optimizer, model_disc, optimizer_disc, sigma_scheme,
+                          mu_scheme, loss_recon, loss_pose, loss_ib, xfrm_sampler,
+                          device=None, non_blocking=False):
 
     if device:
         model.to(device)
         model_disc.to(device)
 
-    def alter_sample(orient):
-        x = torch.zeros_like(orient)
-        x[:, 2:] = orient[:, 2:]
-        x[:, 0] = torch.asin(orient[:, 0]) + 0.1 * torch.randn_like(orient[:, 0])
-        x[:, 1] = torch.cos(x[:, 0])
-        x[:, 0] = torch.sin(x[:, 0])
-        return x
+    def geo_xfrm(x, depth, v_xfrm):
+        pts = geo.depth_2_point(depth, scaling_factor=20, focal_length=0.03)
+        pts_xfrmd = geo.transform_points(pts, v_xfrm)
+        px_xfrmd = geo.point_2_pixel(pts_xfrmd, scaling_factor=20, focal_length=0.03)
+        return geo.warp_img_2_pixel(x, px_xfrmd)
 
     def _update(engine, batch):
         model.train()
-
-        x, d, v, masks, intrinsics = _prepare_batch(batch, device=device, non_blocking=non_blocking)
+        x, d, v, masks, intrinsics = _prepare_batch(batch, device=device,
+                                                    non_blocking=non_blocking)
         orient = v[:, 3:5]
-        # sigma = next(sigma_scheme)
-        sigma = 1.0
-        x_pred, elbo = model(x, orient)
 
+        # Image reconstruction pass ----------------------------------------------------- \
+        # --- predict pose and reconstruct image ---------------------------------------- \
+        x_pred, v_pred = model(x=x)
+
+        # Inductive bias pass ----------------------------------------------------------- \
+        # --- sample pose transform and predict model transformed image ----------------- \
+        v_xfrmd, v_xfrm = xfrm_sampler(v_pred)
+        x_xfrmd, v_xfrmd = model(v=v_xfrmd)
+
+        # --- geometrically transform image by sampled pose transform ------------------- \
+        x_geo_xfrmd = geo_xfrm(x, d, v_xfrm)
+
+        # --- mask model transformed image by geometrically transformed image ----------- \
+        x_xfrmd = x_xfrmd.where(x_geo_xfrmd > 0,
+                                torch.tensor([0.], device=x_geo_xfrmd.device))
+
+        # Discriminate between true and predicted images -------------------------------- \
         dl_pred, d_pred = model_disc(x_pred, orient)
         dl_original, d_original = model_disc(x, orient)
 
-        loss_glld = - torch.mean(torch.sum(Normal(x_pred, sigma).log_prob(x), dim=[1, 2, 3]))
-        loss_llld = - torch.mean(torch.sum(Normal(dl_pred, sigma).log_prob(dl_original), dim=[1, 2, 3]))
+        # Compute losses ---------------------------------------------------------------- \
+        # --- (-) generated image log likelihood w.r.t. true image ---------------------- \
+        loss_glld = - torch.mean(torch.sum(Normal(x_pred, 1.0).log_prob(x),
+                                           dim=[1, 2, 3]))
+
+        # --- (-) disc. l_layer likelihood of generated image w.r.t true image ---------- \
+        loss_llld = - torch.mean(torch.sum(Normal(dl_pred, 1.0).log_prob(dl_original),
+                                           dim=[1, 2, 3]))
+
+        # Compile losses ---------------------------------------------------------------- \
+        # --- disc. loss ---------------------------------------------------------------- \
         loss_disc = torch.mean(-(torch.log(d_original) + 0.5 * (torch.log(1 - d_pred))))
 
-        ib_loss = loss_ib()
-
+        # --- encoder loss -------------------------------------------------------------- \
+        # todo
+        # --- decoder loss -------------------------------------------------------------- \
         loss_decoder = 0.01 * loss_llld + loss_glld
 
-
-
+        # Back-propagate encoder loss --------------------------------------------------- \
+        # todo
+        # Back-propagate decoder loss --------------------------------------------------- \
         optimizer.zero_grad()
         loss_decoder.backward(retain_graph=True)
         optimizer.step()
 
+        # Back-propagate discriminator loss --------------------------------------------- \
         optimizer_disc.zero_grad()
         loss_disc.backward()
         optimizer_disc.step()
 
-        loss_p = 0
-        loss_i = 0
-
+        # Anneal learning rate ---------------------------------------------------------- \
         with torch.no_grad():
-            # Anneal learning rate
             mu = next(mu_scheme)
             i = engine.state.iteration
             for group in optimizer.param_groups:
                 group["lr"] = mu * math.sqrt(1 - 0.999 ** i) / (1 - 0.9 ** i)
 
-        return {"loss": loss_decoder, "mse": F.mse_loss(x_pred, im),
+        return {"loss": loss_decoder, "mse": F.mse_loss(x_pred, x),
                 "loss_relative_pose": loss_llld, "loss_reprojection": loss_disc,
-                "mu": loss_disc, "sigma": elbo}
+                "mu": loss_disc, "sigma": 0.0}
 
     engine = Engine(_update)
 
