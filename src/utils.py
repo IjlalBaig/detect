@@ -1,6 +1,5 @@
 import os
 import json
-
 from torch.optim.lr_scheduler import _LRScheduler
 
 
@@ -110,26 +109,6 @@ def cam_to_pixel(points, intrinsics, img):
     pixel_coords_norm = torch.cat([u.unsqueeze(-1), v.unsqueeze(-1)], dim=-1)
     projected_img = F.grid_sample(img, pixel_coords_norm, padding_mode="zeros")
     return projected_img
-
-# depth = Image.open("D:\\Thesis\\Implementation\\code\\data\\blender_data\\blender_session\\2019_Jul_20_07_28_29\\depth0017.png")
-# depth_t = transforms.ToTensor()(depth.convert("L"))
-# depth_b = depth_t.unsqueeze(0).repeat(2, 1, 1, 1)
-# intrinsics = (torch.tensor([[213.333, 0, 127.5], [0, 213.333, 127.5], [0, 0, 1]])).unsqueeze(0).repeat(2, 1, 1)
-# transform = torch.tensor([[0., 0, 0., 1, 0., 0, 0], [0, 0, 0,   0.992, -0.111, -0.054, 0.054]])
-#
-# cam = pixel_to_cam(depth_b.squeeze(1), intrinsics)
-#
-# trans_matrix = qtvec_to_transformation_matrix(transform)
-#
-# cam_ = transform_points(trans_matrix, cam)
-#
-# out = cam_to_pixel(cam_, intrinsics, depth_b)
-
-# out_1, out_2 = out
-# transforms.ToPILImage()(out_1).show()
-# transforms.ToPILImage()(out_2).show()
-# depth.show()
-
 
 
 

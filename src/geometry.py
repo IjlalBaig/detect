@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-
+import math
 import kornia
 
 
@@ -93,29 +93,48 @@ def qtvec_to_transformation_matrix(pose):
     return trans_matrix
 
 
-def world_2_cam_xfrm(trans):
-    trans = trans * torch.tensor([1., 1., -1., 1., 1., 1., -1.], device=trans.device)
-    return trans.index_select(1, torch.tensor([0, 2, 1, 3, 4, 6, 5], device=trans.device).long())
+def world_2_cam_xfrm(xfrm):
+    X_wc = torch.tensor([[1.,  0.,  0.,  0.],
+                         [0.,  0., -1.,  0.],
+                         [0.,  1.,  0.,  0.],
+                         [0.,  0.,  0.,  1.]], device=xfrm.device)
+    return torch.matmul(X_wc, xfrm)
 
 
-def transform_points(points, trans, orient_mode="quaternion"):
+def transform_points(points, xfrm, orient_mode="sc_euler"):
     """Apply pose transformation [x, y, z, q0, q1, q2, q3] to a cam_coordinates.
         The quaternion should be in (w, x, y, z) format.
         Args:
             points (torch.Tensor): tensor of points of shape :math:`(BxNx3)`.
-            trans (torch.Tensor): tensor for transformations of shape :math:`(B, 7)`.
+            xfrm (torch.Tensor): tensor for transformations of shape :math:`(B, 7)`.
+            orient_mode(str):
         Return:
             torch.Tensor: the transformation matrix of shape :math:`(*, 4, 4)`."""
     b, h, w, _ = points.shape
     points = points.view(b, h*w, 3)
+
+    cam_xfrm = world_2_cam_xfrm(xfrm)
+    x = cam_xfrm[..., 0]
+    y = cam_xfrm[..., 1]
+    z = cam_xfrm[..., 2]
+
     if orient_mode == "quaternion":
-        trans_cam = world_2_cam_xfrm(trans)
-        trans_matrix = qtvec_to_transformation_matrix(trans_cam)
+        xfrm_mat = qtvec_to_transformation_matrix(cam_xfrm)
+
     elif orient_mode == "sc_euler":
-        # todo:
-        # convert euler to rotation matrix
-        pass
-    points_transformed = kornia.transform_points(trans_matrix, points)
+        x_euler = torch.atan2(cam_xfrm[..., 3:4], cam_xfrm[..., 4:5])
+        y_euler = torch.atan2(cam_xfrm[..., 5:6], cam_xfrm[..., 6:7])
+        z_euler = torch.atan2(cam_xfrm[..., 7:8], cam_xfrm[..., 8:9])
+        R = euler_to_mat(torch.cat([x_euler, y_euler, z_euler], dim=-1))
+
+        xfrm_mat = F.pad(R, pad=[0, 1, 0, 1], mode='constant', value=0)
+        xfrm_mat[..., 0, -1] = x
+        xfrm_mat[..., 1, -1] = y
+        xfrm_mat[..., 2, -1] = z
+        xfrm_mat[..., 3, -1] = 1.
+
+    # xfrm_mat = world_2_cam_xfrm(xfrm_mat)
+    points_transformed = kornia.transform_points(xfrm_mat, points)
     return points_transformed.view(b, h, w, 3)
 
 
@@ -299,3 +318,36 @@ def _restrict_hemisphere(quaternion):
     sign = torch.sign(quaternion.index_select(dim=-1, index=torch.tensor([0], device=quaternion.device)))
     sign[sign == 0.] = 1.
     return quaternion * sign
+
+
+def euler_to_mat(euler, order="XYZ"):
+    # unpack the euler components
+    x, y, z = torch.chunk(euler, chunks=3, dim=-1)
+
+    # compute the actual conversion
+    one: torch.Tensor = torch.ones_like(x)
+    zero: torch.Tensor = torch.zeros_like(x)
+
+    sinx: torch.Tensor = torch.sin(x)
+    cosx: torch.Tensor = torch.cos(x)
+    mat_x: torch.Tensor = torch.cat([torch.cat([one, zero, zero], dim=-1).unsqueeze(-2),
+                                     torch.cat([zero, cosx, -sinx], dim=-1).unsqueeze(-2),
+                                     torch.cat([zero, sinx, cosx], dim=-1).unsqueeze(-2)], dim=-2)
+
+    siny: torch.Tensor = torch.sin(y)
+    cosy: torch.Tensor = torch.cos(y)
+    mat_y: torch.Tensor = torch.cat([torch.cat([cosy, zero, siny], dim=-1).unsqueeze(-2),
+                                     torch.cat([zero, one, zero], dim=-1).unsqueeze(-2),
+                                     torch.cat([-siny, zero, cosy], dim=-1).unsqueeze(-2)], dim=-2)
+
+    sinz: torch.Tensor = torch.sin(z)
+    cosz: torch.Tensor = torch.cos(z)
+    mat_z: torch.Tensor = torch.cat([torch.cat([cosz, -sinz, zero], dim=-1).unsqueeze(-2),
+                                     torch.cat([sinz, cosz, zero], dim=-1).unsqueeze(-2),
+                                     torch.cat([zero, zero, one], dim=-1).unsqueeze(-2)], dim=-2)
+
+    return torch.matmul(torch.matmul(eval("mat_{}".format(order[2].lower())),
+                                     eval("mat_{}".format(order[1].lower()))),
+                        eval("mat_{}".format(order[0].lower())))
+
+

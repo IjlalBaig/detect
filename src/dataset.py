@@ -6,7 +6,7 @@ import glob
 import os
 from PIL import Image
 from math import cos, sin, pi
-from scipy.spatial.transform import Rotation as R
+import transforms3d as t3d
 
 import src.utils as utils
 
@@ -55,8 +55,10 @@ class EnvironmentDataset(Dataset):
 
             position = sample.get("cam_position", [])
             orient_quat = sample.get("cam_quaternion", [1., 0., 0., 0.])
-            orient_euler = R.from_quat(orient_quat).as_euler("xyz").tolist()
-            if  not -pi/18 < orient_euler[0] < pi/18:
+            orient_euler = t3d.euler.quat2euler(orient_quat, axes="sxyz")
+
+            # todo: transform to cam frame for relative pose loss
+            if  not -pi/18 < orient_euler[2] < pi/18:
             # if abs(orient_euler[0]) > 0.01:
                 # print(orient_euler[0] * 180. / pi)
                 data_frame = None
