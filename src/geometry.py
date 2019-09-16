@@ -101,6 +101,47 @@ def world_2_cam_xfrm(xfrm):
     return torch.matmul(X_wc, xfrm)
 
 
+def xfrm_to_mat(xfrm, mode="sc_euler"):
+    x = xfrm[..., 0]
+    y = xfrm[..., 1]
+    z = xfrm[..., 2]
+    xfrm_mat = None
+
+    if mode == "quaternion":
+        xfrm_mat = qtvec_to_transformation_matrix(xfrm)
+
+    elif mode == "sc_euler":
+        x_euler = torch.atan2(xfrm[..., 3:4], xfrm[..., 4:5])
+        y_euler = torch.atan2(xfrm[..., 5:6], xfrm[..., 6:7])
+        z_euler = torch.atan2(xfrm[..., 7:8], xfrm[..., 8:9])
+        R = euler_to_mat(torch.cat([x_euler, y_euler, z_euler], dim=-1))
+
+        xfrm_mat = F.pad(R, pad=[0, 1, 0, 1], mode='constant', value=0)
+        xfrm_mat[..., 0, -1] = x
+        xfrm_mat[..., 1, -1] = y
+        xfrm_mat[..., 2, -1] = z
+        xfrm_mat[..., 3, -1] = 1.
+
+    return xfrm_mat
+
+
+def mat_to_xfrm(mat, mode="sc_euler"):
+    x = mat[..., 0, 3].unsqueeze(-1)
+    y = mat[..., 1, 3].unsqueeze(-1)
+    z = mat[..., 2, 3].unsqueeze(-1)
+    xfrm = None
+    if mode == "sc_euler":
+        euler = mat_to_euler(mat)
+        sinx = torch.sin(euler[..., 0]).unsqueeze(-1)
+        cosx = torch.cos(euler[..., 0]).unsqueeze(-1)
+        siny = torch.sin(euler[..., 1]).unsqueeze(-1)
+        cosy = torch.cos(euler[..., 1]).unsqueeze(-1)
+        sinz = torch.sin(euler[..., 2]).unsqueeze(-1)
+        cosz = torch.cos(euler[..., 2]).unsqueeze(-1)
+        xfrm = torch.cat([x, y, z, sinx, cosx, siny, cosy, sinz, cosz], dim=-1)
+    return xfrm
+
+
 def transform_points(points, xfrm, orient_mode="sc_euler"):
     """Apply pose transformation [x, y, z, q0, q1, q2, q3] to a cam_coordinates.
         The quaternion should be in (w, x, y, z) format.
@@ -112,28 +153,7 @@ def transform_points(points, xfrm, orient_mode="sc_euler"):
             torch.Tensor: the transformation matrix of shape :math:`(*, 4, 4)`."""
     b, h, w, _ = points.shape
     points = points.view(b, h*w, 3)
-
-    cam_xfrm = world_2_cam_xfrm(xfrm)
-    x = cam_xfrm[..., 0]
-    y = cam_xfrm[..., 1]
-    z = cam_xfrm[..., 2]
-
-    if orient_mode == "quaternion":
-        xfrm_mat = qtvec_to_transformation_matrix(cam_xfrm)
-
-    elif orient_mode == "sc_euler":
-        x_euler = torch.atan2(cam_xfrm[..., 3:4], cam_xfrm[..., 4:5])
-        y_euler = torch.atan2(cam_xfrm[..., 5:6], cam_xfrm[..., 6:7])
-        z_euler = torch.atan2(cam_xfrm[..., 7:8], cam_xfrm[..., 8:9])
-        R = euler_to_mat(torch.cat([x_euler, y_euler, z_euler], dim=-1))
-
-        xfrm_mat = F.pad(R, pad=[0, 1, 0, 1], mode='constant', value=0)
-        xfrm_mat[..., 0, -1] = x
-        xfrm_mat[..., 1, -1] = y
-        xfrm_mat[..., 2, -1] = z
-        xfrm_mat[..., 3, -1] = 1.
-
-    # xfrm_mat = world_2_cam_xfrm(xfrm_mat)
+    xfrm_mat = xfrm_to_mat(xfrm, orient_mode)
     points_transformed = kornia.transform_points(xfrm_mat, points)
     return points_transformed.view(b, h, w, 3)
 
@@ -351,3 +371,9 @@ def euler_to_mat(euler, order="XYZ"):
                         eval("mat_{}".format(order[0].lower())))
 
 
+def mat_to_euler(mat, order="XYZ"):
+    if order == "XYZ":
+        x = torch.atan2(mat[..., 2, 1], mat[..., 2, 2]).unsqueeze(-1)
+        y = torch.atan2(-mat[..., 2, 0], torch.sqrt(mat[..., 2, 1] ** 2 + mat[..., 2, 2] ** 2)).unsqueeze(-1)
+        z = torch.atan2(mat[..., 1, 0], mat[..., 0, 0]).unsqueeze(-1)
+        return torch.cat([x, y, z], dim=-1)

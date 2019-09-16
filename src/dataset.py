@@ -58,7 +58,7 @@ class EnvironmentDataset(Dataset):
             orient_euler = t3d.euler.quat2euler(orient_quat, axes="sxyz")
 
             # todo: transform to cam frame for relative pose loss
-            if  not -pi/18 < orient_euler[2] < pi/18:
+            if -pi/18 < orient_euler[2] < pi/18:
             # if abs(orient_euler[0]) > 0.01:
                 # print(orient_euler[0] * 180. / pi)
                 data_frame = None

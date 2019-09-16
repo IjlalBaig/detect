@@ -16,76 +16,33 @@ class PoseTransformSampler(nn.Module):
         self.pos_mode = pos_mode
         self.orient_var = orient_var
         self.orient_mode = orient_mode
-    # todo: convert to matrix and back
-    # def xfrm_orient(self, orient, mode='XYZ'):
-    #     xfrm = torch.zeros_like(orient)
-    #     if 'X' in mode:
-    #         xfrm_euler = self.orient_var * torch.randn_like(orient[:, 0])
-    #         orient_euler = torch.atan2(orient[:, 0], orient[:, 1]) + xfrm_euler
-    #
-    #         orient[:, 0] = torch.sin(orient_euler)
-    #         orient[:, 1] = torch.cos(orient_euler)
-    #         xfrm[:, 0] = torch.sin(xfrm_euler)
-    #         xfrm[:, 1] = torch.cos(xfrm_euler)
-    #
-    #     if 'Y' in mode:
-    #         xfrm_euler = self.orient_var * torch.randn_like(orient[:, 2])
-    #         orient_euler = torch.atan2(orient[:, 2], orient[:, 3]) + xfrm_euler
-    #
-    #         orient[:, 2] = torch.sin(orient_euler)
-    #         orient[:, 3] = torch.cos(orient_euler)
-    #         xfrm[:, 2] = torch.sin(xfrm_euler)
-    #         xfrm[:, 3] = torch.cos(xfrm_euler)
-    #
-    #     if 'Z' in mode:
-    #         xfrm_euler = self.orient_var * torch.randn_like(orient[:, 4])
-    #         orient_euler = torch.atan2(orient[:, 4], orient[:, 5]) + xfrm_euler
-    #
-    #         orient[:, 4] = torch.sin(orient_euler)
-    #         orient[:, 5] = torch.cos(orient_euler)
-    #         xfrm[:, 4] = torch.sin(xfrm_euler)
-    #         xfrm[:, 5] = torch.cos(xfrm_euler)
-    #     return orient, xfrm
-    #
-    # def xfrm_pos(self, pos, mode='XYZ'):
-    #     xfrm = torch.zeros_like(pos)
-    #     if 'X' in mode:
-    #         xfrm[:, 0] = self.pos_var * torch.randn_like(pos[:, 0])
-    #         pos[:, 0] = pos[:, 0] + xfrm[:, 0]
-    #
-    #     if 'Y' in mode:
-    #         xfrm[:, 1] = self.pos_var * torch.randn_like(pos[:, 1])
-    #         pos[:, 1] = pos[:, 1] + xfrm[:, 1]
-    #
-    #     if 'Z' in mode:
-    #         xfrm[:, 2] = self.pos_var * torch.randn_like(pos[:, 2])
-    #         pos[:, 2] = pos[:, 2] + xfrm[:, 2]
-    #     return pos, xfrm
+
+    def sample_xfrm(self, v):
+        xfrm = torch.zeros_like(v)
+
+        if "X" in self.pos_mode:
+            xfrm[..., 0] = self.pos_var * torch.randn_like(xfrm[..., 0])
+        if "Y" in self.pos_mode:
+            xfrm[..., 1] = self.pos_var * torch.randn_like(xfrm[..., 1])
+        if "Z" in self.pos_mode:
+            xfrm[..., 2] = self.pos_var * torch.randn_like(xfrm[..., 2])
+
+        if "X" in self.orient_mode:
+            x_euler = self.orient_var * torch.randn_like(xfrm[..., 3])
+            xfrm[..., 3] = torch.sin(x_euler)
+            xfrm[..., 4] = torch.cos(x_euler)
+        if "Y" in self.orient_mode:
+            y_euler = self.orient_var * torch.randn_like(xfrm[..., 5])
+            xfrm[..., 5] = torch.sin(y_euler)
+            xfrm[..., 6] = torch.cos(y_euler)
+        if "Z" in self.orient_mode:
+            z_euler = self.orient_var * torch.randn_like(xfrm[..., 7])
+            xfrm[..., 7] = torch.sin(z_euler)
+            xfrm[..., 8] = torch.cos(z_euler)
+        return xfrm
 
     def forward(self, v):
-        x = v[..., 0]
-        y = v[..., 1]
-        z = v[..., 2]
-        x_euler = torch.atan2(v[..., 3:4], v[..., 4:5])
-        y_euler = torch.atan2(v[..., 5:6], v[..., 6:7])
-        z_euler = torch.atan2(v[..., 7:8], v[..., 8:9])
-        R = geo.euler_to_mat(torch.cat([x_euler, y_euler, z_euler], dim=-1))
-
-        xfrm_mat = F.pad(R, pad=[0, 1, 0, 1], mode='constant', value=0)
-        xfrm_mat[..., 0, -1] = x
-        xfrm_mat[..., 1, -1] = y
-        xfrm_mat[..., 2, -1] = z
-        xfrm_mat[..., 3, -1] = 1.
-        # v_xfrm = torch.zeros_like(v)
-        # pos_len = len(self.pos_mode)
-        # if pos_len > 0:
-        #     v[:, 0:pos_len], v_xfrm[:, 0:pos_len] = self.xfrm_pos(v[:, 0:pos_len], mode=self.pos_mode)
-        #
-        # orient_len = len(self.orient_mode)
-        # if orient_len > 0:
-        #     v[:, pos_len: pos_len + orient_len * 2], v_xfrm[:, pos_len: pos_len + orient_len * 2] = \
-        #         self.xfrm_orient(v[:, pos_len: pos_len + orient_len * 2], mode=self.orient_mode)
-        return v, v_xfrm
+        return self.sample_xfrm(v)
 
 
 class TransformationLoss(nn.Module):

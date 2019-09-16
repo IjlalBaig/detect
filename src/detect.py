@@ -102,21 +102,21 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu,
                                                    im_dims=(64, 64), standardize=standardize)
 
     # Create model and optimizer
-    model_enc, model_dec = detectnet(2)
-    model_disc = Discriminator()
+    model_enc, model_dec = detectnet(9)
+    model_disc = Discriminator(v_dim=9)
 
-    optim_enc = torch.optim.Adam(model_enc.parameters(), lr=0.00005)
-    optim_dec = torch.optim.Adam(model_dec.parameters(), lr=0.00005)
+    optim_enc = torch.optim.Adam(model_enc.parameters(), lr=0.001)
+    optim_dec = torch.optim.Adam(model_dec.parameters(), lr=0.001)
     optim_disc = torch.optim.Adam(model_disc.parameters(), lr=0.001)
 
-    pose_xfrmer = PoseTransformSampler()
+    pose_xfrm_sampler = PoseTransformSampler(pos_mode='', orient_mode='XYZ')
 
     mu_scheme = Annealer(5 * 10 ** (-5), 5 * 10 ** (-7), 40000)
     # create engines
     trainer_engine = create_trainer_engine(model_enc, optim_enc,
                                            model_dec, optim_dec,
                                            model_disc, optim_disc,
-                                           mu_scheme, xfrm_sampler=pose_xfrmer, device=device)
+                                           mu_scheme, xfrm_sampler=pose_xfrm_sampler, device=device)
     evaluator_engine = create_evaluator_engine(model_enc, model_dec, device=device)
 
     # init checkpoint handler
@@ -129,10 +129,10 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu,
 
     # define progress bar
     pbar = ProgressBar()
-    metric_names = ["loss", "mse", "mu", "sigma"]
+    metric_names = ["loss_enc", "loss_dec", "loss_disc_logit", "loss_recon"]
     pbar.attach(trainer_engine, metric_names=metric_names)
 
-    # tensorboard --logdir=log --host=127.0.0.1
+    # tensorboard --logdir=log/base_restrict_all --host=127.0.0.1
 
     @trainer_engine.on(Events.STARTED)
     def load_latest_checkpoint(engine):
@@ -147,7 +147,7 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu,
             model_dec.eval()
 
             model_disc.load_state_dict(checkpoint_dict.get("model_disc"))
-            optim_disc.load_state_dict(checkpoint_dict.get("optimizer_disc"))
+            optim_disc.load_state_dict(checkpoint_dict.get("optim_disc"))
             model_disc.eval()
 
             engine.state.epoch = checkpoint_dict.get("epoch")
@@ -180,19 +180,31 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu,
         model_enc.eval()
         model_dec.eval()
         with torch.no_grad():
-            im, depth, v, masks, intrinsics = _prepare_batch(batch, device=device, non_blocking=True)
-            b, c, h, w = im.size()
+            x, d, v, masks, intr = _prepare_batch(batch, device=device, non_blocking=True)
+            b, c, h, w = x.size()
 
             orient = v[:, 3:5]
 
-            v_pred = model_enc(im)
+            v_pred = model_enc(x)
             x_pred = model_dec(v_pred)
 
+            # Inductive bias pass
+            v_xfrm = pose_xfrm_sampler(v_pred)
+            v_xfrmd = xfrm_pose(v_pred, v_xfrm)
+
+            x_geo_xfrmd = geo_xfrm(x, d, v_xfrm)
+            x_xfrmd = model_dec(v_xfrmd)
+            x_xfrmd = x_xfrmd.where(x_geo_xfrmd > 0,
+                                    torch.tensor([0.], device=x_geo_xfrmd.device))
+
             # send to cpu
-            im = im.detach().cpu().float()
-            im_pred = x_pred.detach().cpu().float()
-            writer.add_image("ground truth", make_grid(im), engine.state.epoch)
-            writer.add_image("reconstruction", make_grid(im_pred), engine.state.epoch)
+            x = x.detach().cpu().float()
+            x_pred = x_pred.detach().cpu().float()
+            writer.add_image("ground truth", make_grid(x), engine.state.epoch)
+            writer.add_image("reconstruction", make_grid(x_pred), engine.state.epoch)
+            writer.add_image("geo transformed", make_grid(x_geo_xfrmd), engine.state.epoch)
+            writer.add_image("model transformed", make_grid(x_xfrmd), engine.state.epoch)
+
 
     @trainer_engine.on(Events.EPOCH_COMPLETED)
     def log_validation_metrics(engine):
@@ -261,6 +273,32 @@ def _prepare_batch(batch, device=None, non_blocking=False):
             convert_tensor(intrinsics, device=device, non_blocking=non_blocking))
 
 
+def geo_xfrm(x, depth, xfrm):
+    pts = geo.depth_2_point(depth, scaling_factor=20, focal_length=0.03)
+    pts_xfrmd = geo.transform_points(pts, xfrm)
+    px_xfrmd = geo.point_2_pixel(pts_xfrmd, scaling_factor=20, focal_length=0.03)
+    return geo.warp_img_2_pixel(x, px_xfrmd)
+
+
+def xfrm_pose(v, xfrm):
+    xfrm_mat = geo.xfrm_to_mat(xfrm)
+    v_mat = geo.xfrm_to_mat(v)
+    v_xfrmd_mat = torch.matmul(xfrm_mat, v_mat)
+    v_xfrmd = geo.mat_to_xfrm(v_xfrmd_mat)
+    return v_xfrmd
+
+def rel_pose_xfrm(v1, v2):
+    v1_mat = geo.world_2_cam_xfrm(geo.xfrm_to_mat(v1))
+    v2_mat = geo.world_2_cam_xfrm(geo.xfrm_to_mat(v2))
+
+    v3_mat = torch.zeros_like(v1_mat)
+    v3_mat[..., :3, :3] = torch.matmul(v1_mat[..., :3, :3].transpose(-2, -1),
+                                       v2_mat[..., :3, :3])
+    v3_mat[..., -1] = v2_mat[..., -1] - v1_mat[..., -1]
+    return geo.mat_to_xfrm(v3_mat)
+
+
+EPSILON = 1e-6
 def create_trainer_engine(model_enc, optim_enc, model_dec, optim_dec, model_disc, optim_disc,
                           mu_scheme, xfrm_sampler, device=None, non_blocking=False):
 
@@ -269,12 +307,6 @@ def create_trainer_engine(model_enc, optim_enc, model_dec, optim_dec, model_disc
         model_dec.to(device)
         model_disc.to(device)
 
-    def geo_xfrm(x, depth, v_xfrm):
-        pts = geo.depth_2_point(depth, scaling_factor=20, focal_length=0.03)
-        pts_xfrmd = geo.transform_points(pts, v_xfrm)
-        px_xfrmd = geo.point_2_pixel(pts_xfrmd, scaling_factor=20, focal_length=0.03)
-        return geo.warp_img_2_pixel(x, px_xfrmd)
-
     def _update(engine, batch):
         model_enc.train()
         model_dec.train()
@@ -282,48 +314,58 @@ def create_trainer_engine(model_enc, optim_enc, model_dec, optim_dec, model_disc
 
         x, d, v, masks, intrinsics = _prepare_batch(batch, device=device,
                                                     non_blocking=non_blocking)
-        orient = v[:, 3:5]
-        # todo: check in this is inplace or not, we want it inplace btw
-
         # Image reconstruction pass
         v_pred = model_enc(x)
         x_pred = model_dec(v_pred)
 
+        v_rel = rel_pose_xfrm(v, v.roll(1, dims=0))
+        v_pred_rel = rel_pose_xfrm(v_pred, v_pred.roll(1, dims=0))
+
         # Inductive bias pass
-        v_xfrmd, v_xfrm = xfrm_sampler(v_pred)
-        x_xfrmd = model_dec(v_xfrmd)
+        v_xfrm = xfrm_sampler(v_pred)
+        v_xfrmd = xfrm_pose(v_pred, v_xfrm)
 
         x_geo_xfrmd = geo_xfrm(x, d, v_xfrm)
-        x_xfrmd = x_xfrmd.where(x_geo_xfrmd > 0,
-                                torch.tensor([0.], device=x_geo_xfrmd.device))
+        x_xfrmd = model_dec(v_xfrmd)
 
         # Discriminate Images
-        dl_pred, d_pred = model_disc(x_pred, orient)
-        dl_original, d_original = model_disc(x, orient)
+        dl_pred, d_pred = model_disc(x_pred, v_pred)
+        dl_original, d_original = model_disc(x, v_pred)
 
         # Compute losses
+        # relative pose loss
+        loss_v_rel = F.mse_loss(v_pred_rel, v_rel)
+
         # (-) log likelihood generated img
-        loss_glld = - torch.mean(torch.sum(Normal(x_pred, 1.0).log_prob(x),
-                                           dim=[1, 2, 3]))
+        # loss_glld = - torch.mean(torch.sum(Normal(x_pred, 1.0).log_prob(x),
+        #                                    dim=[1, 2, 3]))
 
         # (-) log likelihood transformed img
-        loss_tlld = - torch.mean(torch.sum(Normal(x_xfrmd, 1.0).log_prob(x_geo_xfrmd),
-                                           dim=[1, 2, 3]))
-
+        x_xfrmd = x_xfrmd.where(x_geo_xfrmd > 0,
+                                torch.tensor([0.], device=x_geo_xfrmd.device))
+        # loss_tlld = - torch.mean(torch.sum(Normal(x_xfrmd, 1.0).log_prob(x_geo_xfrmd),
+        #                                    dim=[1, 2, 3]))
+        loss_tlld = F.mse_loss(x_xfrmd, x_geo_xfrmd)
         # (-) disc. l_layer likelihood
         loss_llld = - torch.mean(torch.sum(Normal(dl_pred, 1.0).log_prob(dl_original),
                                            dim=[1, 2, 3]))
 
-        # discriminator loss
-        loss_disc = torch.mean(-(torch.log(d_original) + 0.5 * (torch.log(1 - d_pred))))
+
+
+        loss_glld = F.mse_loss(x_pred, x)
 
         # encoder loss
         alpha = 0.01
-        loss_enc = loss_llld + alpha * loss_tlld
-
+        # loss_enc = loss_llld + alpha * loss_tlld
+        loss_enc = alpha * loss_tlld + loss_v_rel
         # decoder loss
         beta = 0.01
+        # loss_dec = beta * loss_llld + loss_glld
         loss_dec = beta * loss_llld + loss_glld
+
+        # discriminator loss
+        loss_disc = torch.mean(-(torch.log(d_original+EPSILON) + torch.log(1 - d_pred + EPSILON))) + \
+                    0. * loss_tlld + 0. * loss_v_rel
 
         # Back-propagate propagation
         optim_enc.zero_grad()
@@ -339,29 +381,25 @@ def create_trainer_engine(model_enc, optim_enc, model_dec, optim_dec, model_disc
         optim_disc.step()
 
         # Anneal learning rate
-        with torch.no_grad():
-            mu = next(mu_scheme)
-            i = engine.state.iteration
-            for group in optim_enc.param_groups:
-                group["lr"] = mu * math.sqrt(1 - 0.999 ** i) / (1 - 0.9 ** i)
-            for group in optim_dec.param_groups:
-                group["lr"] = mu * math.sqrt(1 - 0.999 ** i) / (1 - 0.9 ** i)
+        # with torch.no_grad():
+        #     mu = next(mu_scheme)
+        #     i = engine.state.iteration
+        #     for group in optim_enc.param_groups:
+        #         group["lr"] = mu * math.sqrt(1 - 0.999 ** i) / (1 - 0.9 ** i)
+        #     for group in optim_dec.param_groups:
+        #         group["lr"] = mu * math.sqrt(1 - 0.999 ** i) / (1 - 0.9 ** i)
 
-        return {"loss": loss_dec, "mse": F.mse_loss(x_pred, x),
-                "loss_relative_pose": loss_llld, "loss_reprojection": loss_disc,
-                "mu": loss_disc, "sigma": 0.0}
+        return {"loss_enc": loss_enc, "loss_dec": loss_dec,
+                "loss_disc_layer": loss_v_rel, "loss_disc_logit": 0.,
+                "loss_recon": F.mse_loss(x_pred, x)}
 
     engine = Engine(_update)
 
-    # add metrics
-    RunningAverage(output_transform=lambda x: x["loss"]).attach(engine, "loss")
-    RunningAverage(output_transform=lambda x: x["mse"]).attach(engine, "mse")
-    RunningAverage(output_transform=lambda x: x["mu"]).attach(engine, "mu")
-    RunningAverage(output_transform=lambda x: x["sigma"]).attach(engine, "sigma")
-
-    # RunningAverage(output_transform=lambda x: x["loss_relative_pose"]).attach(engine, "relative_pose_loss")
-    # RunningAverage(output_transform=lambda x: x["loss_reprojection"]).attach(engine, "reprojection_loss")
-
+    # Add metrics
+    RunningAverage(output_transform=lambda x: x["loss_enc"]).attach(engine, "loss_enc")
+    RunningAverage(output_transform=lambda x: x["loss_dec"]).attach(engine, "loss_dec")
+    RunningAverage(output_transform=lambda x: x["loss_disc_logit"]).attach(engine, "loss_disc_logit")
+    RunningAverage(output_transform=lambda x: x["loss_recon"]).attach(engine, "loss_recon")
     return engine
 
 
@@ -389,27 +427,14 @@ def create_evaluator_engine(model_enc, model_dec, device=None, non_blocking=Fals
         model_dec.eval()
         with torch.no_grad():
             x, d, v, masks, intr = _prepare_batch(batch, device=device, non_blocking=non_blocking)
-
-            orient = v[:, 3:5]
             v_pred = model_enc(x)
             x_pred = model_dec(v_pred)
 
-            loss = F.mse_loss(x_pred, x)
-            loss_p = 0
-            loss_i = 0
-
-            return {"loss": loss, "mse": loss, "loss_relative_pose": loss_p,
-                    "loss_reprojection": loss_i, "pose_difference": 0.0}
+            return {"loss_recon": F.mse_loss(x_pred, x)}
 
     engine = Engine(_inference)
 
-    # add metrics
-    RunningAverage(output_transform=lambda x: x["loss"]).attach(engine, "loss")
-    RunningAverage(output_transform=lambda x: x["mse"]).attach(engine, "mse")
-    # RunningAverage(output_transform=lambda x: x["loss_relative_pose"]).attach(engine, "relative_pose_loss")
-    # RunningAverage(output_transform=lambda x: x["loss_reprojection"]).attach(engine, "reprojection_loss")
-    # EpochAverage(output_transform=lambda x: x["loss"]).attach(engine, "avg_error")
-    # EpochAverage(output_transform=lambda x: x["pose_difference"]).attach(engine, "avg_pose")
-    # EpochMax(output_transform=lambda x: x["pose_difference"]).attach(engine, "max_pose")
+    # Add metrics
+    RunningAverage(output_transform=lambda x: x["loss_recon"]).attach(engine, "loss_recon")
     return engine
 
