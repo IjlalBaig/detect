@@ -105,11 +105,11 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu,
     model_enc, model_dec = detectnet(9)
     model_disc = Discriminator(v_dim=9)
 
-    optim_enc = torch.optim.Adam(model_enc.parameters(), lr=0.001)
-    optim_dec = torch.optim.Adam(model_dec.parameters(), lr=0.001)
+    optim_enc = torch.optim.Adam(model_enc.parameters(), lr=5e-4)
+    optim_dec = torch.optim.Adam(model_dec.parameters(), lr=5e-4)
     optim_disc = torch.optim.Adam(model_disc.parameters(), lr=0.001)
 
-    pose_xfrm_sampler = PoseTransformSampler(pos_mode='', orient_mode='XYZ')
+    pose_xfrm_sampler = PoseTransformSampler(pos_mode='', orient_mode='Y')
 
     mu_scheme = Annealer(5 * 10 ** (-5), 5 * 10 ** (-7), 40000)
     # create engines
@@ -187,6 +187,11 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu,
 
             v_pred = model_enc(x)
             x_pred = model_dec(v_pred)
+            print("z_true", torch.atan2(v[..., -2], v[..., -1]) * 180 / math.pi)
+            print("x_pred", torch.atan2(v_pred[..., -6], v_pred[..., -5]) * 180 / math.pi)
+            print("y_pred", torch.atan2(v_pred[..., -4], v_pred[..., -3]) * 180 / math.pi)
+            print("z_pred", torch.atan2(v_pred[..., -2], v_pred[..., -1]) * 180 / math.pi)
+            print("translation", v_pred[..., :3])
 
             # Inductive bias pass
             v_xfrm = pose_xfrm_sampler(v_pred)
@@ -316,6 +321,8 @@ def create_trainer_engine(model_enc, optim_enc, model_dec, optim_dec, model_disc
                                                     non_blocking=non_blocking)
         # Image reconstruction pass
         v_pred = model_enc(x)
+        v_pred_mat = geo.xfrm_to_mat(v_pred)
+        v_pred = geo.mat_to_xfrm(v_pred_mat)
         x_pred = model_dec(v_pred)
 
         v_rel = rel_pose_xfrm(v, v.roll(1, dims=0))
@@ -355,17 +362,17 @@ def create_trainer_engine(model_enc, optim_enc, model_dec, optim_dec, model_disc
         loss_glld = F.mse_loss(x_pred, x)
 
         # encoder loss
-        alpha = 0.01
+        alpha = 0.5
         # loss_enc = loss_llld + alpha * loss_tlld
         loss_enc = alpha * loss_tlld + loss_v_rel
         # decoder loss
         beta = 0.01
         # loss_dec = beta * loss_llld + loss_glld
-        loss_dec = beta * loss_llld + loss_glld
+        loss_dec = 0. * loss_llld + loss_glld + 0. * loss_v_rel + 0. * loss_tlld
 
         # discriminator loss
-        loss_disc = torch.mean(-(torch.log(d_original+EPSILON) + torch.log(1 - d_pred + EPSILON))) + \
-                    0. * loss_tlld + 0. * loss_v_rel
+        # loss_disc = torch.mean(-(torch.log(d_original+EPSILON) + torch.log(1 - d_pred + EPSILON))) + \
+        #             0. * loss_tlld + 0. * loss_v_rel
 
         # Back-propagate propagation
         optim_enc.zero_grad()
@@ -373,12 +380,12 @@ def create_trainer_engine(model_enc, optim_enc, model_dec, optim_dec, model_disc
         optim_enc.step()
 
         optim_dec.zero_grad()
-        loss_dec.backward(retain_graph=True)
+        loss_dec.backward()
         optim_dec.step()
 
-        optim_disc.zero_grad()
-        loss_disc.backward()
-        optim_disc.step()
+        # optim_disc.zero_grad()
+        # loss_disc.backward()
+        # optim_disc.step()
 
         # Anneal learning rate
         # with torch.no_grad():
@@ -390,7 +397,7 @@ def create_trainer_engine(model_enc, optim_enc, model_dec, optim_dec, model_disc
         #         group["lr"] = mu * math.sqrt(1 - 0.999 ** i) / (1 - 0.9 ** i)
 
         return {"loss_enc": loss_enc, "loss_dec": loss_dec,
-                "loss_disc_layer": loss_v_rel, "loss_disc_logit": 0.,
+                "loss_disc_layer": loss_v_rel, "loss_disc_logit": loss_v_rel,
                 "loss_recon": F.mse_loss(x_pred, x)}
 
     engine = Engine(_update)
