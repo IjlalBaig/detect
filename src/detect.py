@@ -344,14 +344,14 @@ def create_trainer_engine(model_enc, optim_enc, model_dec, optim_dec, model_disc
         loss_v_rel = F.mse_loss(v_pred_rel, v_rel)
 
         # (-) log likelihood generated img
-        # loss_glld = - torch.mean(torch.sum(Normal(x_pred, 1.0).log_prob(x),
-        #                                    dim=[1, 2, 3]))
+        loss_glld = - torch.mean(torch.sum(Normal(x_pred, 1.0).log_prob(x),
+                                           dim=[1, 2, 3]))
 
         # (-) log likelihood transformed img
         x_xfrmd = x_xfrmd.where(x_geo_xfrmd > 0,
                                 torch.tensor([0.], device=x_geo_xfrmd.device))
-        # loss_tlld = - torch.mean(torch.sum(Normal(x_xfrmd, 1.0).log_prob(x_geo_xfrmd),
-        #                                    dim=[1, 2, 3]))
+        loss_tlld = - torch.mean(torch.sum(Normal(x_xfrmd, 1.0).log_prob(x_geo_xfrmd),
+                                           dim=[1, 2, 3]))
         loss_tlld = F.mse_loss(x_xfrmd, x_geo_xfrmd)
         # (-) disc. l_layer likelihood
         loss_llld = - torch.mean(torch.sum(Normal(dl_pred, 1.0).log_prob(dl_original),
@@ -359,20 +359,20 @@ def create_trainer_engine(model_enc, optim_enc, model_dec, optim_dec, model_disc
 
 
 
-        loss_glld = F.mse_loss(x_pred, x)
+        # loss_glld = F.mse_loss(x_pred, x)
 
         # encoder loss
         alpha = 0.5
-        # loss_enc = loss_llld + alpha * loss_tlld
-        loss_enc = alpha * loss_tlld + loss_v_rel
+        loss_enc = loss_llld + alpha * loss_tlld
+        # loss_enc = alpha * loss_tlld + loss_v_rel
         # decoder loss
         beta = 0.01
         # loss_dec = beta * loss_llld + loss_glld
-        loss_dec = 0. * loss_llld + loss_glld + 0. * loss_v_rel + 0. * loss_tlld
+        loss_dec = loss_llld + loss_glld + 0. * loss_v_rel + 0. * loss_tlld
 
         # discriminator loss
-        # loss_disc = torch.mean(-(torch.log(d_original+EPSILON) + torch.log(1 - d_pred + EPSILON))) + \
-        #             0. * loss_tlld + 0. * loss_v_rel
+        loss_disc = torch.mean(-(torch.log(d_original+EPSILON) + torch.log(1 - d_pred + EPSILON))) + \
+                    0. * loss_v_rel + 0. * loss_tlld + 0. * loss_llld + 0. * loss_glld
 
         # Back-propagate propagation
         optim_enc.zero_grad()
@@ -380,12 +380,12 @@ def create_trainer_engine(model_enc, optim_enc, model_dec, optim_dec, model_disc
         optim_enc.step()
 
         optim_dec.zero_grad()
-        loss_dec.backward()
+        loss_dec.backward(retain_graph=True)
         optim_dec.step()
 
-        # optim_disc.zero_grad()
-        # loss_disc.backward()
-        # optim_disc.step()
+        optim_disc.zero_grad()
+        loss_disc.backward()
+        optim_disc.step()
 
         # Anneal learning rate
         # with torch.no_grad():
