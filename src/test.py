@@ -3,7 +3,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch.distributions import Normal
 from torch.distributions.kl import kl_divergence
-
+from src.components import Deconv3x3
 
 from torchvision.models import resnet18
 
@@ -238,9 +238,9 @@ class DetectNetEncoder(nn.Module):
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
         self.layer1 = self._make_layer(block, 128, layers[0])
-
         self.layer2 = self._make_layer(block, 128, layers[1], stride=2, dilate=replace_stride_with_dilation[0])
         self.layer3 = self._make_layer(block, 256, layers[2], stride=2, dilate=replace_stride_with_dilation[1])
+        self.conv_prior = nn.Conv2d(64 + 64, 64, kernel_size=3, stride=1, padding=1)
         self.layer4 = self._make_layer(block, 512, layers[3], stride=2, dilate=replace_stride_with_dilation[2])
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Linear(512 * block.expansion, v_dim)
@@ -288,17 +288,17 @@ class DetectNetEncoder(nn.Module):
 
         return nn.Sequential(*layers)
 
-    def forward(self, x):
+    def forward(self, x, prior):
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
+        x = self.conv_prior(torch.cat([x, prior.repeat(x.size(0), 1, 1, 1)], dim=1))
         x = self.maxpool(x)
 
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
         x = self.layer4(x)
-
         x = self.avgpool(x)
         x = x.reshape(x.size(0), -1)
         x = self.fc(x)
@@ -306,10 +306,10 @@ class DetectNetEncoder(nn.Module):
 
 
 class DetectNetDecoder(nn.Module):
-    def __init__(self, trans_block, trans_layers, v_dim=6, zero_init_residual=False ):
+    def __init__(self, trans_block, trans_layers, v_dim=6, zero_init_residual=False):
         super(DetectNetDecoder, self).__init__()
         self.inplanes = 64
-
+        self.conv_prior = nn.Conv2d(16+64, 128, kernel_size=3, stride=1, padding=1)
         # Decoder Section
         self.fc = nn.Sequential(
             nn.Linear(v_dim, 1024)
@@ -335,7 +335,18 @@ class DetectNetDecoder(nn.Module):
             for m in self.modules():
                 if isinstance(m, TransBasicBlock):
                     nn.init.constant_(m.bn2.weight, 0)
-
+        self.deconv_v = nn.Sequential(
+            Deconv3x3(v_dim, 16, 2),
+            nn.ReLU(),
+            Deconv3x3(16, 16, 2),
+            nn.ReLU(),
+            Deconv3x3(16, 16, 2),
+            nn.ReLU(),
+            Deconv3x3(16, 16, 2),
+            nn.ReLU(),
+            Deconv3x3(16, 16, 2),
+            nn.ReLU(),
+        )
     def _make_transpose(self, block, planes, blocks, stride=1):
         upsample = None
         if stride != 1:
@@ -361,15 +372,21 @@ class DetectNetDecoder(nn.Module):
 
         return nn.Sequential(*layers)
 
-    def forward(self, v):
-        x = self.fc(v)
-        x = x.view(-1, 64, 4, 4)
-        x = self.trans_layer1(x)
-        x = self.trans_layer2(x)
-        x = self.trans_layer3(x)
+
+    def forward(self, v, prior, v_=None):
+        if v_ is not None:
+            v = v_
+        v = v.view(-1, v.size(1), 1, 1)
+        v = self.deconv_v(v)
+        x = torch.cat([v, prior.repeat(v.size(0), 1, 1, 1)], dim=1)
+        x = self.conv_prior(x)
+        # x = self.fc(v)
+        # x = x.view(-1, 64, 4, 4)
+        # x = self.trans_layer1(x)
+        # x = self.trans_layer2(x)
+        # x = self.trans_layer3(x)
         x = self.trans_layer4(x)
         x = self.final_deconv(x)
-
         return x
 
 
@@ -417,6 +434,20 @@ class Discriminator(nn.Module):
         x_merge = self.flatten(x)
         x_merge = self.fc_merge(torch.cat([x_merge, v], dim=1))
         return x, self.fc(x_merge)
+
+
+class Priori(nn.Module):
+    def __init__(self):
+        super(Priori, self).__init__()
+        self.fc = nn.Linear(1, 16384)
+        self.conv = nn.Conv2d(16, 64, kernel_size=3, stride=1, padding=1)
+
+    def forward(self):
+        ones = torch.ones(1, device="cuda")
+        x = self.fc(ones)
+        x = x.view(1, 16, 32, 32)
+        x = self.conv(x)
+        return x
 
 
 def detectnet(v_dim=9):
