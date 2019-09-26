@@ -288,11 +288,10 @@ class DetectNetEncoder(nn.Module):
 
         return nn.Sequential(*layers)
 
-    def forward(self, x, prior):
+    def forward(self, x):
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
-        x = self.conv_prior(torch.cat([x, prior.repeat(x.size(0), 1, 1, 1)], dim=1))
         x = self.maxpool(x)
 
         x = self.layer1(x)
@@ -315,11 +314,13 @@ class DetectNetDecoder(nn.Module):
             nn.Linear(v_dim, 1024)
         )
         self.trans_layer1 = self._make_transpose(trans_block, 512, trans_layers[0], stride=2)
-        self.trans_layer2 = self._make_transpose(trans_block, 256, trans_layers[1], stride=2)
+        self.trans_layer2 = Deconv3x3(512, 512, 2)
+        # self.trans_layer2 = self._make_transpose(trans_block, 256, trans_layers[1], stride=2)
         self.trans_layer3 = self._make_transpose(trans_block, 128, trans_layers[2], stride=2)
-        self.trans_layer4 = self._make_transpose(trans_block, 64, trans_layers[3], stride=2)
-
-        self.final_deconv = nn.ConvTranspose2d(64, 1, kernel_size=3, stride=1, padding=1, bias=True)
+        # self.trans_layer4 = self._make_transpose(trans_block, 64, trans_layers[3], stride=2)
+        self.trans_layer4 = Deconv3x3(128, 64, 2)
+        self.dropout = nn.Dropout2d(0.2)
+        self.final_deconv = nn.ConvTranspose2d(64, 3, kernel_size=3, stride=1, padding=1, bias=True)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -372,20 +373,13 @@ class DetectNetDecoder(nn.Module):
 
         return nn.Sequential(*layers)
 
-
-    def forward(self, v, prior, v_=None):
-        if v_ is not None:
-            v = v_
-        v = v.view(-1, v.size(1), 1, 1)
-        v = self.deconv_v(v)
-        x = torch.cat([v, prior.repeat(v.size(0), 1, 1, 1)], dim=1)
-        x = self.conv_prior(x)
-        # x = self.fc(v)
-        # x = x.view(-1, 64, 4, 4)
-        # x = self.trans_layer1(x)
-        # x = self.trans_layer2(x)
-        # x = self.trans_layer3(x)
-        x = self.trans_layer4(x)
+    def forward(self, v):
+        x = self.fc(v)
+        x = x.view(-1, 64, 4, 4)
+        x = self.trans_layer1(x)
+        x = F.relu(self.trans_layer2(x))
+        x = self.trans_layer3(x)
+        x = F.relu(self.trans_layer4(x))
         x = self.final_deconv(x)
         return x
 

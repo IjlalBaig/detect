@@ -54,7 +54,9 @@ def test(batch_sizes, data_dir, log_dir, fractions, workers, use_gpu, standardiz
                                                    batch_sizes=batch_sizes, num_workers=workers,
                                                    im_dims=(64, 64), standardize=standardize)
 
-    model_enc, model_dec = detectnet(2)
+    model_enc, model_dec = detectnet(9)
+    model_enc.to(device)
+    model_dec.to(device)
 
     # init checkpoint handler
     model_name = model_enc.__class__.__name__ + model_dec.__class__.__name__
@@ -65,7 +67,6 @@ def test(batch_sizes, data_dir, log_dir, fractions, workers, use_gpu, standardiz
 
 
     # pose_xfrm_sampler = PoseTransformSampler(device=device)
-    evaluator_engine = create_evaluator_engine(model_enc, model_dec, device=device)
     writer = SummaryWriter(log_dir=os.path.join(log_dir, "test"))
 
     # load checkpoint
@@ -78,17 +79,21 @@ def test(batch_sizes, data_dir, log_dir, fractions, workers, use_gpu, standardiz
         model_dec.eval()
 
     # evaluate
-    for i, batch in enumerate(test_loader):
+    # for i, batch in enumerate(test_loader):
+    for i in range(360):
         with torch.no_grad():
-            im, depth, v, masks, intrinsics = _prepare_batch(batch, device=device, non_blocking=True)
-            orient = v[:, 3:5]
-
-            x_pred = model_dec(orient)
+            # im, depth, v, masks, intrinsics = _prepare_batch(batch, device=device, non_blocking=True)
+            v = torch.tensor([0., 0., i/180,
+                              math.sin(0 * math.pi / 180), math.cos(0 * math.pi / 180),
+                              math.sin(0 * math.pi / 180), math.cos(0 * math.pi / 180),
+                              math.sin(180 * math.pi / 180), math.cos(180 * math.pi / 180)],
+                             device=device)
+            x_pred = model_dec(v)
 
             # send to cpu
-            im = im.detach().cpu().float()
+            # im = im.detach().cpu().float()
             im_pred = x_pred.detach().cpu().float()
-            writer.add_image("ground truth", make_grid(im), i)
+            # writer.add_image("ground truth", make_grid(im), i)
             writer.add_image("reconstruction", make_grid(im_pred), i)
 
     writer.close()
@@ -97,7 +102,7 @@ def test(batch_sizes, data_dir, log_dir, fractions, workers, use_gpu, standardiz
 def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu, standardize=False):
     device = "cuda" if torch.cuda.is_available() and use_gpu else "cpu"
 
-    train_loader, val_loader, _ = get_data_loaders(dpath=data_dir, fractions=fractions, im_mode="L",
+    train_loader, val_loader, _ = get_data_loaders(dpath=data_dir, fractions=fractions, im_mode="RGB",
                                                    batch_sizes=batch_sizes, num_workers=workers,
                                                    im_dims=(64, 64), standardize=standardize)
 
@@ -107,7 +112,7 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu,
     model_priori = Priori()
 
     optim_enc = torch.optim.Adam(model_enc.parameters(), lr=1e-3)
-    optim_dec = torch.optim.Adam(model_dec.parameters(), lr=1e-3)
+    optim_dec = torch.optim.Adam(model_dec.parameters(), lr=1e-3, weight_decay=0.001)
     optim_disc = torch.optim.Adam(model_disc.parameters(), lr=1e-3)
     optim_priori = torch.optim.Adam(model_priori.parameters(), lr=1e-3)
 
@@ -136,7 +141,7 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu,
     metric_names = ["loss_enc", "loss_dec", "loss_disc_logit", "loss_recon"]
     pbar.attach(trainer_engine, metric_names=metric_names)
 
-    # tensorboard --logdir=log/base_restrict_all --host=127.0.0.1
+    # tensorboard --logdir=log/base_restrict_all --host=127.0.0.1 --samples_per_plugin images=360
 
     @trainer_engine.on(Events.STARTED)
     def load_latest_checkpoint(engine):
@@ -196,8 +201,8 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu,
 
             orient = v[:, 3:5]
             prior = model_priori()
-            v_pred = model_enc(x, prior)
-            x_pred = model_dec(v_pred, prior, v)
+            # v_pred = model_enc(x)
+            x_pred = model_dec(v)
             # print("z_true", torch.atan2(v[..., -2], v[..., -1]) * 180 / math.pi)
             # print("x_pred", torch.atan2(v_pred[..., -6], v_pred[..., -5]) * 180 / math.pi)
             # print("y_pred", torch.atan2(v_pred[..., -4], v_pred[..., -3]) * 180 / math.pi)
@@ -336,11 +341,10 @@ def create_trainer_engine(model_enc, optim_enc, model_dec, optim_dec, model_disc
         # Image reconstruction pass
         m = torch.randn(x.size(), device=device)
         x_noise = x.where(m > 0., torch.zeros_like(x))
-        prior = model_priori()
-        v_pred = model_enc(x, prior)
+        # v_pred = model_enc(x)
         # v_pred_mat = geo.xfrm_to_mat(v_pred)
         # v_pred = geo.mat_to_xfrm(v_pred_mat)
-        x_pred = model_dec(v_pred, prior, v)
+        x_pred = model_dec(v)
 
         # v_rel = rel_pose_xfrm(v, v.roll(1, dims=0))
         # v_pred_rel = rel_pose_xfrm(v_pred, v_pred.roll(1, dims=0))
@@ -361,8 +365,9 @@ def create_trainer_engine(model_enc, optim_enc, model_dec, optim_dec, model_disc
         # loss_v_rel = F.mse_loss(v_pred_rel, v_rel)
 
         # (-) log likelihood generated img
-        loss_glld = - torch.mean(torch.sum(Normal(x_pred.where(x_noise > 0., torch.zeros_like(x_noise)),
-                                                  1.0).log_prob(x_noise), dim=[1, 2, 3]))
+        # loss_glld = - torch.mean(torch.sum(Normal(x_pred.where(x_noise > 0., torch.zeros_like(x_noise)),
+        #                                           1.0).log_prob(x_noise), dim=[1, 2, 3]))
+        loss_glld = - torch.mean(torch.sum(Normal(x_pred, 1.0).log_prob(x), dim=[1, 2, 3]))
 
         # (-) log likelihood transformed img
         # x_xfrmd = x_xfrmd.where(x_geo_xfrmd > 0,
@@ -397,9 +402,9 @@ def create_trainer_engine(model_enc, optim_enc, model_dec, optim_dec, model_disc
         # loss_enc.backward(retain_graph=True)
         # optim_enc.step()
 
-        optim_priori.zero_grad()
-        loss_priori.backward(retain_graph=True)
-        optim_priori.step()
+        # optim_priori.zero_grad()
+        # loss_priori.backward(retain_graph=True)
+        # optim_priori.step()
 
         optim_dec.zero_grad()
         loss_dec.backward()
@@ -460,9 +465,9 @@ def create_evaluator_engine(model_enc, model_dec, model_priori, device=None, non
         model_priori.eval()
         with torch.no_grad():
             x, d, v, masks, intr = _prepare_batch(batch, device=device, non_blocking=non_blocking)
-            prior = model_priori()
-            v_pred = model_enc(x, prior)
-            x_pred = model_dec(v_pred, prior)
+            # prior = model_priori()
+            # v_pred = model_enc(x)
+            x_pred = model_dec(v)
 
             return {"loss_recon": F.mse_loss(x_pred, x)}
 
