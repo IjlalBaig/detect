@@ -232,7 +232,7 @@ class DetectNetEncoder(nn.Module):
                              "or a 3-element tuple, got {}".format(replace_stride_with_dilation))
         self.groups = groups
         self.base_width = width_per_group
-        self.conv1 = nn.Conv2d(1, self.inplanes, kernel_size=7, stride=2, padding=3,
+        self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=7, stride=2, padding=3,
                                    bias=False)
         self.bn1 = norm_layer(self.inplanes)
         self.relu = nn.ReLU(inplace=True)
@@ -373,15 +373,27 @@ class DetectNetDecoder(nn.Module):
 
         return nn.Sequential(*layers)
 
-    def forward(self, v):
+    def mix(self, a, b, lambda_):
+        return lambda_*a + (1-lambda_)*b
+
+    def forward(self, v, shift=None, lambda_=None):
         x = self.fc(v)
         x = x.view(-1, 64, 4, 4)
         x = self.trans_layer1(x)
         x = F.relu(self.trans_layer2(x))
         x = self.trans_layer3(x)
-        x = F.relu(self.trans_layer4(x))
-        x = self.final_deconv(x)
-        return x
+        x_ = F.relu(self.trans_layer4(x))
+        x = self.final_deconv(x_)
+
+        if shift is None or lambda_ is None:
+            return x
+        else:
+            x_mix = self.mix(x_, x_.roll(shift, dims=0), lambda_)
+            # x_mix = F.relu(self.trans_layer2(x_mix))
+            # x_mix = self.trans_layer3(x_mix)
+            # x_mix = F.relu(self.trans_layer4(x_mix))
+            x_mix = self.final_deconv(x_mix)
+            return x, x_mix
 
 
 class Discriminator(nn.Module):
