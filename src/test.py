@@ -232,15 +232,15 @@ class DetectNetEncoder(nn.Module):
                              "or a 3-element tuple, got {}".format(replace_stride_with_dilation))
         self.groups = groups
         self.base_width = width_per_group
-        self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=7, stride=2, padding=3,
+        self.conv1 = nn.Conv2d(4, self.inplanes, kernel_size=7, stride=2, padding=3,
                                    bias=False)
         self.bn1 = norm_layer(self.inplanes)
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-        self.layer1 = self._make_layer(block, 128, layers[0])
+
+        self.layer1 = self._make_layer(block, 64, layers[0])
         self.layer2 = self._make_layer(block, 128, layers[1], stride=2, dilate=replace_stride_with_dilation[0])
         self.layer3 = self._make_layer(block, 256, layers[2], stride=2, dilate=replace_stride_with_dilation[1])
-        self.conv_prior = nn.Conv2d(64 + 64, 64, kernel_size=3, stride=1, padding=1)
         self.layer4 = self._make_layer(block, 512, layers[3], stride=2, dilate=replace_stride_with_dilation[2])
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Linear(512 * block.expansion, v_dim)
@@ -288,20 +288,67 @@ class DetectNetEncoder(nn.Module):
 
         return nn.Sequential(*layers)
 
-    def forward(self, x):
+    def mix(self, a, b, lambda_):
+        return lambda_*a + (1-lambda_)*b
+
+    def forward(self, x, shift=None, lambda_=None):
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
         x = self.maxpool(x)
-
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
+        x = F.relu(self.layer1(x))
+        x = F.relu(self.layer2(x))
+        x = F.relu(self.layer3(x))
         x = self.layer4(x)
         x = self.avgpool(x)
-        x = x.reshape(x.size(0), -1)
-        x = self.fc(x)
-        return x
+        x_ = x.reshape(x.size(0), -1)
+        x = self.fc(x_)
+
+        p, o = x.split([3, 6], dim=-1)
+        o_x = torch.atan2(o[:, 0], o[:, 1])
+        o_y = torch.atan2(o[:, 2], o[:, 3])
+        o_z = torch.atan2(o[:, 4], o[:, 5])
+        s_x = torch.sin(o_x).unsqueeze(-1)
+        c_x = torch.cos(o_x).unsqueeze(-1)
+        s_y = torch.sin(o_y).unsqueeze(-1)
+        c_y = torch.cos(o_y).unsqueeze(-1)
+        s_z = torch.sin(o_z).unsqueeze(-1)
+        c_z = torch.cos(o_z).unsqueeze(-1)
+
+        x = torch.cat([p, s_x, c_x, s_y, c_y, s_z, c_z], dim=1)
+        # x[:, 0] = 0.
+        x[:, 1] = 0.
+        x[:, 2] = 1.5
+
+        x[:, 3] = 0.
+        x[:, 4] = 1.
+        x[:, 5] = 0.
+        x[:, 6] = 1.
+        if shift is None or lambda_ is None:
+            return x
+        else:
+            x_mix = self.mix(x_, x_.roll(shift, dims=0), lambda_)
+            x_mix = self.fc(x_mix)
+            p, o = x_mix.split([3, 6], dim=-1)
+            o_x = torch.atan2(o[:, 0], o[:, 1])
+            o_y = torch.atan2(o[:, 2], o[:, 3])
+            o_z = torch.atan2(o[:, 4], o[:, 5])
+            s_x = torch.sin(o_x).unsqueeze(-1)
+            c_x = torch.cos(o_x).unsqueeze(-1)
+            s_y = torch.sin(o_y).unsqueeze(-1)
+            c_y = torch.cos(o_y).unsqueeze(-1)
+            s_z = torch.sin(o_z).unsqueeze(-1)
+            c_z = torch.cos(o_z).unsqueeze(-1)
+
+            x_mix = torch.cat([p, s_x, c_x, s_y, c_y, s_z, c_z], dim=1)
+            x_mix[:, 1] = 0.
+            x_mix[:, 2] = 1.5
+
+            x_mix[:, 3] = 0.
+            x_mix[:, 4] = 1.
+            x_mix[:, 5] = 0.
+            x_mix[:, 6] = 1.
+            return x, x_mix
 
 
 class DetectNetDecoder(nn.Module):
@@ -314,13 +361,10 @@ class DetectNetDecoder(nn.Module):
             nn.Linear(v_dim, 1024)
         )
         self.trans_layer1 = self._make_transpose(trans_block, 512, trans_layers[0], stride=2)
-        self.trans_layer2 = Deconv3x3(512, 512, 2)
-        # self.trans_layer2 = self._make_transpose(trans_block, 256, trans_layers[1], stride=2)
+        self.trans_layer2 = self._make_transpose(trans_block, 256, trans_layers[1], stride=2)
         self.trans_layer3 = self._make_transpose(trans_block, 128, trans_layers[2], stride=2)
-        # self.trans_layer4 = self._make_transpose(trans_block, 64, trans_layers[3], stride=2)
-        self.trans_layer4 = Deconv3x3(128, 64, 2)
-        self.dropout = nn.Dropout2d(0.2)
-        self.final_deconv = nn.ConvTranspose2d(64, 3, kernel_size=3, stride=1, padding=1, bias=True)
+        self.trans_layer4 = self._make_transpose(trans_block, 64, trans_layers[3], stride=2)
+        self.final_deconv = nn.ConvTranspose2d(64, 4, kernel_size=3, stride=1, padding=1, bias=True)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -336,18 +380,7 @@ class DetectNetDecoder(nn.Module):
             for m in self.modules():
                 if isinstance(m, TransBasicBlock):
                     nn.init.constant_(m.bn2.weight, 0)
-        self.deconv_v = nn.Sequential(
-            Deconv3x3(v_dim, 16, 2),
-            nn.ReLU(),
-            Deconv3x3(16, 16, 2),
-            nn.ReLU(),
-            Deconv3x3(16, 16, 2),
-            nn.ReLU(),
-            Deconv3x3(16, 16, 2),
-            nn.ReLU(),
-            Deconv3x3(16, 16, 2),
-            nn.ReLU(),
-        )
+
     def _make_transpose(self, block, planes, blocks, stride=1):
         upsample = None
         if stride != 1:
@@ -381,19 +414,19 @@ class DetectNetDecoder(nn.Module):
         x = x.view(-1, 64, 4, 4)
         x = self.trans_layer1(x)
         x = F.relu(self.trans_layer2(x))
-        x = self.trans_layer3(x)
+        x = F.relu(self.trans_layer3(x))
         x_ = F.relu(self.trans_layer4(x))
         x = self.final_deconv(x_)
 
         if shift is None or lambda_ is None:
-            return x
+            x, d = x.split([3, 1], dim=1)
+            return x, d
         else:
             x_mix = self.mix(x_, x_.roll(shift, dims=0), lambda_)
-            # x_mix = F.relu(self.trans_layer2(x_mix))
-            # x_mix = self.trans_layer3(x_mix)
-            # x_mix = F.relu(self.trans_layer4(x_mix))
             x_mix = self.final_deconv(x_mix)
-            return x, x_mix
+            x_mix, d_mix = x_mix.split([3, 1], dim=1)
+            x, d = x.split([3, 1], dim=1)
+            return x, d, x_mix, d_mix
 
 
 class Discriminator(nn.Module):
@@ -463,8 +496,8 @@ def detectnet(v_dim=9):
         pretrained (bool): If True, returns a model pre-trained on ImageNet
         progress (bool): If True, displays a progress bar of the download to stderr
     """
-    return DetectNetEncoder(BasicBlock, [2, 2, 2, 2], v_dim=v_dim), \
-           DetectNetDecoder(TransBasicBlock, [2, 2, 2, 2], v_dim=v_dim)
+    return DetectNetEncoder(BasicBlock, [1, 1, 1, 1], v_dim=v_dim), \
+           DetectNetDecoder(TransBasicBlock, [1, 1, 1, 1], v_dim=v_dim)
 
 
 
