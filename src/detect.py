@@ -84,7 +84,7 @@ def test(batch_sizes, data_dir, log_dir, fractions, workers, use_gpu, standardiz
         with torch.no_grad():
             # im, depth, v, masks, intrinsics = _prepare_batch(batch, device=device, non_blocking=True)
             # -0.5 + i/360 - 0.2 + 4*i/3600
-            v = torch.tensor([0, 0., 1.5,
+            v = torch.tensor([0., 0., 0,
                               math.sin(0 * math.pi / 180), math.cos(0 * math.pi / 180),
                               math.sin(0 * math.pi / 180), math.cos(0 * math.pi / 180),
                               math.sin(i * math.pi / 180), math.cos(i * math.pi / 180)],
@@ -187,8 +187,8 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu,
                                 torch.atan2(v_pred[:, 7], v_pred[:, 8]).unsqueeze(-1)], dim=-1)
             p_pred = v_pred[:, :3]
 
-            print(torch.cat([p - p.roll(1, dims=0), (o - o.roll(1, dims=0))*180/math.pi], dim=0))
-            print(torch.cat([p_pred - p_pred.roll(1, dims=0), (o_pred - o_pred.roll(1, dims=0))*180/math.pi], dim=0))
+            print(torch.cat([(p - p.roll(1, dims=0)), (o - o.roll(1, dims=0))*180/math.pi], dim=1))
+            print(torch.cat([(p_pred - p_pred.roll(1, dims=0)), (o_pred - o_pred.roll(1, dims=0))*180/math.pi], dim=1))
             # print(v, v_pred)
             x_pred, d_pred = model_dec(v_pred)
 
@@ -307,6 +307,26 @@ def pose_to_euler(v):
                    torch.atan2(v[:, 7], v[:, 8]).unsqueeze(-1)], dim=-1) *180/math.pi
     return torch.cat([p, o], dim=1)
 
+
+def rploss(v_pred, v):
+    t0_rel = rel_pose_xfrm(v, v.roll(1, dims=0))
+    t1_rel = rel_pose_xfrm(v, v.roll(2, dims=0))
+    t2_rel = rel_pose_xfrm(v, v.roll(3, dims=0))
+
+    t0_pred_rel = rel_pose_xfrm(v_pred, v_pred.roll(1, dims=0))
+    t1_pred_rel = rel_pose_xfrm(v_pred, v_pred.roll(2, dims=0))
+    t2_pred_rel = rel_pose_xfrm(v_pred, v_pred.roll(3, dims=0))
+
+    e0 = t0_pred_rel - t0_rel
+    e1 = t1_pred_rel - t1_rel
+    e2 = t2_pred_rel - t2_rel
+
+    loss = ((2 * e0[:, :3].norm(dim=1) + e0[:, 3:].norm(dim=1)) + \
+           (2 * e1[:, :3].norm(dim=1) + e1[:, 3:].norm(dim=1)) + \
+           (2 * e2[:, :3].norm(dim=1) + e2[:, 3:].norm(dim=1))).mean()
+    return loss
+
+
 def create_trainer_engine(model_enc, optim_enc, model_dec, optim_dec, xfrm_sampler, mixup_sampler,
                           device=None, non_blocking=False):
     if device:
@@ -324,8 +344,7 @@ def create_trainer_engine(model_enc, optim_enc, model_dec, optim_dec, xfrm_sampl
         lambda_ = mixup_sampler.sample()
         mixup_shift = random.randint(1, x.size(0))
         # Infer pose
-        v_pred, v_mix_pred = model_enc(torch.cat([x, d], dim=1),  shift=mixup_shift, lambda_=lambda_)
-        v_mix = model_enc.mix(v, v.roll(mixup_shift, dims=0), lambda_)
+        v_pred = model_enc(torch.cat([x, d], dim=1))
         # Regenerate Image from pose
         x_pred, d_pred, x_mix_pred, d_mix_pred = model_dec(v_pred, shift=mixup_shift, lambda_=lambda_)
         x_mix = model_dec.mix(x, x.roll(mixup_shift, dims=0), lambda_)
@@ -340,74 +359,11 @@ def create_trainer_engine(model_enc, optim_enc, model_dec, optim_dec, xfrm_sampl
         ###
         # Inductive biases
         #   Relative pose loss
-        t_mix_rel = rel_pose_xfrm(v_mix, v_mix.roll(1, dims=0))
-        t0_rel = rel_pose_xfrm(v, v.roll(1, dims=0))
-        t1_rel = rel_pose_xfrm(v, v.roll(2, dims=0))
-        t2_rel = rel_pose_xfrm(v, v.roll(3, dims=0))
-        t3_rel = rel_pose_xfrm(v, v.roll(4, dims=0))
-        t4_rel = rel_pose_xfrm(v, v.roll(5, dims=0))
-        t5_rel = rel_pose_xfrm(v, v.roll(6, dims=0))
-        t6_rel = rel_pose_xfrm(v, v.roll(7, dims=0))
-        t7_rel = rel_pose_xfrm(v, v.roll(8, dims=0))
-        t8_rel = rel_pose_xfrm(v, v.roll(9, dims=0))
-        t9_rel = rel_pose_xfrm(v, v.roll(10, dims=0))
-        t10_rel = rel_pose_xfrm(v, v.roll(11, dims=0))
-
-
-        # v0_pred_rel = xfrm_pose(v_pred, t0_rel)
-        # v1_pred_rel = xfrm_pose(v_pred, t1_rel)
-        # v2_pred_rel = xfrm_pose(v_pred, t2_rel)
-        # v3_pred_rel = xfrm_pose(v_pred, t3_rel)
-        t_mix_pred_rel = rel_pose_xfrm(v_mix_pred, v_mix_pred.roll(1, dims=0))
-        t0_pred_rel = rel_pose_xfrm(v_pred, v_pred.roll(1, dims=0))
-        t1_pred_rel = rel_pose_xfrm(v_pred, v_pred.roll(2, dims=0))
-        t2_pred_rel = rel_pose_xfrm(v_pred, v_pred.roll(3, dims=0))
-        t3_pred_rel = rel_pose_xfrm(v_pred, v_pred.roll(4, dims=0))
-        t4_pred_rel = rel_pose_xfrm(v_pred, v_pred.roll(5, dims=0))
-        t5_pred_rel = rel_pose_xfrm(v_pred, v_pred.roll(6, dims=0))
-        t6_pred_rel = rel_pose_xfrm(v_pred, v_pred.roll(7, dims=0))
-        t7_pred_rel = rel_pose_xfrm(v_pred, v_pred.roll(8, dims=0))
-        t8_pred_rel = rel_pose_xfrm(v_pred, v_pred.roll(9, dims=0))
-        t9_pred_rel = rel_pose_xfrm(v_pred, v_pred.roll(10, dims=0))
-        t10_pred_rel = rel_pose_xfrm(v_pred, v_pred.roll(11, dims=0))
-
-
-        # x0_pred_rel, d0_pred_rel = model_dec(v0_pred_rel)
-        # x1_pred_rel, d1_pred_rel = model_dec(v1_pred_rel)
-        # x2_pred_rel, d2_pred_rel = model_dec(v2_pred_rel)
-        # x3_pred_rel, d3_pred_rel = model_dec(v3_pred_rel)
-        #
-        # x0_rel = x.roll(1, dims=0)
-        # x1_rel = x.roll(2, dims=0)
-        # x2_rel = x.roll(3, dims=0)
-        # x3_rel = x.roll(4, dims=0)
-        # d0_rel = d.roll(1, dims=0)
-        # d1_rel = d.roll(2, dims=0)
-        # d2_rel = d.roll(3, dims=0)
-        # d3_rel = d.roll(4, dims=0)
-        #
-        # loss_rel = (- torch.mean(torch.mean(Normal(x0_pred_rel, 1.0).log_prob(x0_rel), dim=[1, 2, 3])) - \
-        #               torch.mean(torch.mean(Normal(d0_pred_rel, 1.0).log_prob(d0_rel), dim=[1, 2, 3])) - \
-        #               torch.mean(torch.mean(Normal(x1_pred_rel, 1.0).log_prob(x1_rel), dim=[1, 2, 3])) - \
-        #               torch.mean(torch.mean(Normal(d1_pred_rel, 1.0).log_prob(d1_rel), dim=[1, 2, 3])) - \
-        #               torch.mean(torch.mean(Normal(x2_pred_rel, 1.0).log_prob(x2_rel), dim=[1, 2, 3])) - \
-        #               torch.mean(torch.mean(Normal(d2_pred_rel, 1.0).log_prob(d2_rel), dim=[1, 2, 3])) - \
-        #               torch.mean(torch.mean(Normal(x3_pred_rel, 1.0).log_prob(x3_rel), dim=[1, 2, 3])) - \
-        #               torch.mean(torch.mean(Normal(d3_pred_rel, 1.0).log_prob(d3_rel), dim=[1, 2, 3])))/8
-        loss_rel = (F.mse_loss(t0_pred_rel, t0_rel) + \
-                   F.mse_loss(t1_pred_rel, t1_rel) + \
-                   F.mse_loss(t2_pred_rel, t2_rel) + \
-                   F.mse_loss(t3_pred_rel, t3_rel) + \
-                    F.mse_loss(t4_pred_rel, t4_rel) + \
-                    F.mse_loss(t5_pred_rel, t5_rel) + \
-                    F.mse_loss(t6_pred_rel, t6_rel) + \
-                    F.mse_loss(t7_pred_rel, t7_rel) + \
-                    F.mse_loss(t8_pred_rel, t8_rel) + \
-                    F.mse_loss(t9_pred_rel, t9_rel) + \
-                    F.mse_loss(t10_pred_rel, t10_rel)) / 11 + F.mse_loss(t_mix_pred_rel, t_mix_rel)
+        loss_rel = rploss(v_pred, v)
+        # loss_rel = (F.mse_loss(t0_pred_rel, t0_rel) + \
+        #            F.mse_loss(t1_pred_rel, t1_rel) + \
+        #            F.mse_loss(t2_pred_rel, t2_rel)) / 3 + 0.5*F.mse_loss(t_mix_pred_rel, t_mix_rel)
         # v_pred_rel = xfrm_pose(v_pred, t_rel)
-        # print(v)
-        # print(v_pred_rel)
         # x_rel = x.roll(1, dims=0)
         # d_rel = d.roll(1, dims=0)
         # x_mix_rel = model_dec.mix(x, x.roll(mixup_shift, dims=0), lambda_).roll(1, dims=0)

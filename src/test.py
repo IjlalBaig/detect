@@ -298,11 +298,11 @@ class DetectNetEncoder(nn.Module):
         x = self.maxpool(x)
         x = F.relu(self.layer1(x))
         x = F.relu(self.layer2(x))
-        x = F.relu(self.layer3(x))
-        x = self.layer4(x)
+        x_ = F.relu(self.layer3(x))
+        x = self.layer4(x_)
         x = self.avgpool(x)
-        x_ = x.reshape(x.size(0), -1)
-        x = self.fc(x_)
+        x = x.reshape(x.size(0), -1)
+        x = self.fc(x)
 
         p, o = x.split([3, 6], dim=-1)
         o_x = torch.atan2(o[:, 0], o[:, 1])
@@ -317,17 +317,20 @@ class DetectNetEncoder(nn.Module):
 
         x = torch.cat([p, s_x, c_x, s_y, c_y, s_z, c_z], dim=1)
         # x[:, 0] = 0.
-        x[:, 1] = 0.
-        x[:, 2] = 1.5
+        # x[:, 1] = 0.
+        # x[:, 2] = 1.5
 
-        x[:, 3] = 0.
-        x[:, 4] = 1.
-        x[:, 5] = 0.
-        x[:, 6] = 1.
+        # x[:, 3] = 0.
+        # x[:, 4] = 1.
+        # x[:, 5] = 0.
+        # x[:, 6] = 1.
         if shift is None or lambda_ is None:
             return x
         else:
             x_mix = self.mix(x_, x_.roll(shift, dims=0), lambda_)
+            x_mix = self.layer4(x_mix)
+            x_mix = self.avgpool(x_mix)
+            x_mix = x_mix.reshape(x_mix.size(0), -1)
             x_mix = self.fc(x_mix)
             p, o = x_mix.split([3, 6], dim=-1)
             o_x = torch.atan2(o[:, 0], o[:, 1])
