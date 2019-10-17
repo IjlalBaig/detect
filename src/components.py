@@ -7,10 +7,11 @@ import src.geometry as geo
 import kornia
 from math import pi
 from pytorch_msssim import SSIM
+import random
 
 
 class PoseTransformSampler(nn.Module):
-    def __init__(self, pos_var=0.1, orient_var=pi/36, pos_mode='XYZ', orient_mode='XYZ'):
+    def __init__(self, pos_var=0.5, orient_var=pi/36, pos_mode='XYZ', orient_mode='XYZ'):
         super(PoseTransformSampler, self).__init__()
         self.pos_var = pos_var
         self.pos_mode = pos_mode
@@ -19,27 +20,33 @@ class PoseTransformSampler(nn.Module):
 
     def sample_xfrm(self, v):
         xfrm = torch.zeros_like(v)
+        dev = v.device
+        xfrm[:, 4] = xfrm[:, 6] = xfrm[:, 8] = 1.
+        error_axis = random.sample("Y", 1)[0]
+        if error_axis is "Z":
+            if "Y" in self.pos_mode:
+                xfrm[..., 1] = self.pos_var * torch.randn(1, device=dev) + xfrm[..., 1]
+            if "X" in self.orient_mode:
+                x_euler = self.orient_var * torch.randn(1, device=dev)
+                xfrm[..., 3] = torch.sin(x_euler)
+                xfrm[..., 4] = torch.cos(x_euler)
 
-        if "X" in self.pos_mode:
-            xfrm[..., 0] = self.pos_var * torch.randn_like(xfrm[..., 0])
-        if "Y" in self.pos_mode:
-            xfrm[..., 1] = self.pos_var * torch.randn_like(xfrm[..., 1])
-        if "Z" in self.pos_mode:
-            xfrm[..., 2] = self.pos_var * torch.randn_like(xfrm[..., 2])
+        elif error_axis is "Y":
+            if "X" in self.pos_mode:
+                xfrm[..., 0] = self.pos_var * torch.randn(1, device=dev) + xfrm[..., 0]
+            if "Z" in self.orient_mode:
+                z_euler = self.orient_var * torch.randn(1, device=dev)
+                xfrm[..., 7] = torch.sin(z_euler)
+                xfrm[..., 8] = torch.cos(z_euler)
 
-        if "X" in self.orient_mode:
-            x_euler = self.orient_var * torch.randn_like(xfrm[..., 3])
-            xfrm[..., 3] = torch.sin(x_euler)
-            xfrm[..., 4] = torch.cos(x_euler)
-        if "Y" in self.orient_mode:
-            y_euler = self.orient_var * torch.randn_like(xfrm[..., 5])
-            xfrm[..., 5] = torch.sin(y_euler)
-            xfrm[..., 6] = torch.cos(y_euler)
-        if "Z" in self.orient_mode:
-            z_euler = self.orient_var * torch.randn_like(xfrm[..., 7])
-            xfrm[..., 7] = torch.sin(z_euler)
-            xfrm[..., 8] = torch.cos(z_euler)
-        return xfrm
+        else:
+            if "Z" in self.pos_mode:
+                xfrm[..., 2] = self.pos_var * torch.randn(1, device=dev) + xfrm[..., 2]
+            if "Y" in self.orient_mode:
+                y_euler = self.orient_var * torch.randn(1, device=dev)
+                xfrm[..., 5] = torch.sin(y_euler)
+                xfrm[..., 6] = torch.cos(y_euler)
+        return xfrm, error_axis
 
     def forward(self, v):
         return self.sample_xfrm(v)

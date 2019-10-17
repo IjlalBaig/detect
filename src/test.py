@@ -220,6 +220,8 @@ class DetectNetEncoder(nn.Module):
         super(DetectNetEncoder, self).__init__()
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
+
+        self.calib = nn.Linear(1, 6)
         self._norm_layer = norm_layer
         self.inplanes = 64
         self.dilation = 1
@@ -232,7 +234,7 @@ class DetectNetEncoder(nn.Module):
                              "or a 3-element tuple, got {}".format(replace_stride_with_dilation))
         self.groups = groups
         self.base_width = width_per_group
-        self.conv1 = nn.Conv2d(4, self.inplanes, kernel_size=7, stride=2, padding=3,
+        self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=7, stride=2, padding=3,
                                    bias=False)
         self.bn1 = norm_layer(self.inplanes)
         self.relu = nn.ReLU(inplace=True)
@@ -291,7 +293,7 @@ class DetectNetEncoder(nn.Module):
     def mix(self, a, b, lambda_):
         return lambda_*a + (1-lambda_)*b
 
-    def forward(self, x, shift=None, lambda_=None):
+    def forward(self, x):
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
@@ -318,40 +320,27 @@ class DetectNetEncoder(nn.Module):
         x = torch.cat([p, s_x, c_x, s_y, c_y, s_z, c_z], dim=1)
         # x[:, 0] = 0.
         # x[:, 1] = 0.
-        # x[:, 2] = 1.5
+        x[:, 2] = 1.5
 
-        # x[:, 3] = 0.
-        # x[:, 4] = 1.
-        # x[:, 5] = 0.
-        # x[:, 6] = 1.
-        if shift is None or lambda_ is None:
-            return x
-        else:
-            x_mix = self.mix(x_, x_.roll(shift, dims=0), lambda_)
-            x_mix = self.layer4(x_mix)
-            x_mix = self.avgpool(x_mix)
-            x_mix = x_mix.reshape(x_mix.size(0), -1)
-            x_mix = self.fc(x_mix)
-            p, o = x_mix.split([3, 6], dim=-1)
-            o_x = torch.atan2(o[:, 0], o[:, 1])
-            o_y = torch.atan2(o[:, 2], o[:, 3])
-            o_z = torch.atan2(o[:, 4], o[:, 5])
-            s_x = torch.sin(o_x).unsqueeze(-1)
-            c_x = torch.cos(o_x).unsqueeze(-1)
-            s_y = torch.sin(o_y).unsqueeze(-1)
-            c_y = torch.cos(o_y).unsqueeze(-1)
-            s_z = torch.sin(o_z).unsqueeze(-1)
-            c_z = torch.cos(o_z).unsqueeze(-1)
+        x[:, 3] = 0.
+        x[:, 4] = 1.
+        x[:, 5] = 0.
+        x[:, 6] = 1.
+        t, r = torch.split(self.calib(torch.ones(x.size(0), 1, device=x.device)), [3, 3], dim=1)
+        s_x = torch.sin(r[:, 0]).unsqueeze(-1)
+        c_x = torch.cos(r[:, 0]).unsqueeze(-1)
+        s_y = torch.sin(r[:, 1]).unsqueeze(-1)
+        c_y = torch.cos(r[:, 1]).unsqueeze(-1)
+        s_z = torch.sin(r[:, 2]).unsqueeze(-1)
+        c_z = torch.cos(r[:, 2]).unsqueeze(-1)
+        k = torch.cat([t, s_x, c_x, s_y, c_y, s_z, c_z], dim=1)
+        k[:, 1] = k[:, 2] = 0
+        k[:, 3] = 0.
+        k[:, 4] = 1.
+        k[:, 5] = 0.
+        k[:, 6] = 1.
 
-            x_mix = torch.cat([p, s_x, c_x, s_y, c_y, s_z, c_z], dim=1)
-            x_mix[:, 1] = 0.
-            x_mix[:, 2] = 1.5
-
-            x_mix[:, 3] = 0.
-            x_mix[:, 4] = 1.
-            x_mix[:, 5] = 0.
-            x_mix[:, 6] = 1.
-            return x, x_mix
+        return x, k
 
 
 class DetectNetDecoder(nn.Module):
@@ -367,7 +356,7 @@ class DetectNetDecoder(nn.Module):
         self.trans_layer2 = self._make_transpose(trans_block, 256, trans_layers[1], stride=2)
         self.trans_layer3 = self._make_transpose(trans_block, 128, trans_layers[2], stride=2)
         self.trans_layer4 = self._make_transpose(trans_block, 64, trans_layers[3], stride=2)
-        self.final_deconv = nn.ConvTranspose2d(64, 4, kernel_size=3, stride=1, padding=1, bias=True)
+        self.final_deconv = nn.ConvTranspose2d(64, 3, kernel_size=3, stride=1, padding=1, bias=True)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -422,14 +411,11 @@ class DetectNetDecoder(nn.Module):
         x = self.final_deconv(x_)
 
         if shift is None or lambda_ is None:
-            x, d = x.split([3, 1], dim=1)
-            return x, d
+            return x
         else:
             x_mix = self.mix(x_, x_.roll(shift, dims=0), lambda_)
             x_mix = self.final_deconv(x_mix)
-            x_mix, d_mix = x_mix.split([3, 1], dim=1)
-            x, d = x.split([3, 1], dim=1)
-            return x, d, x_mix, d_mix
+            return x, x_mix
 
 
 class Discriminator(nn.Module):

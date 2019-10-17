@@ -50,7 +50,7 @@ def test(batch_sizes, data_dir, log_dir, fractions, workers, use_gpu, standardiz
 
     device = "cuda" if torch.cuda.is_available() and use_gpu else "cpu"
 
-    train_loader, _, test_loader = get_data_loaders(dpath=data_dir, fractions=fractions, im_mode="L",
+    train_loader, _, test_loader = get_data_loaders(dpath=data_dir, fractions=fractions, im_mode="RGB",
                                                    batch_sizes=batch_sizes, num_workers=workers,
                                                    im_dims=(64, 64), standardize=standardize)
 
@@ -62,11 +62,6 @@ def test(batch_sizes, data_dir, log_dir, fractions, workers, use_gpu, standardiz
     model_name = model_enc.__class__.__name__ + model_dec.__class__.__name__
     checkpoint_handler = ModelCheckpoint(dpath=log_dir, filename_prefix=model_name, n_saved=3)
 
-    # ssim_loss = nn.MSELoss()
-    ssim_loss = SSIM(win_size=11, data_range=1., size_average=True, channel=1)
-
-
-    # pose_xfrm_sampler = PoseTransformSampler(device=device)
     writer = SummaryWriter(log_dir=os.path.join(log_dir, "test"))
 
     # load checkpoint
@@ -79,23 +74,38 @@ def test(batch_sizes, data_dir, log_dir, fractions, workers, use_gpu, standardiz
         model_dec.eval()
 
     # evaluate
-    # for i, batch in enumerate(test_loader):
-    for i in range(360):
+    for i, batch in enumerate(test_loader):
         with torch.no_grad():
-            # im, depth, v, masks, intrinsics = _prepare_batch(batch, device=device, non_blocking=True)
-            # -0.5 + i/360 - 0.2 + 4*i/3600
-            v = torch.tensor([0., 0., 0,
-                              math.sin(0 * math.pi / 180), math.cos(0 * math.pi / 180),
-                              math.sin(0 * math.pi / 180), math.cos(0 * math.pi / 180),
-                              math.sin(i * math.pi / 180), math.cos(i * math.pi / 180)],
-                             device=device)
-            x_pred, d_pred = model_dec(v)
+            im, depth, v, masks, intrinsics = _prepare_batch(batch, device=device, non_blocking=True)
 
+            v_pred, t_c = model_enc(im)
+            vc_pred = xfrm_pose(v_pred, t_c)
+            x_pred = model_dec(vc_pred)
+
+            print("a: ", v, v_pred)
+            print("b: ", t_c)
             # send to cpu
-            # im = im.detach().cpu().float()
+            im = im.detach().cpu().float()
             im_pred = x_pred.detach().cpu().float()
-            # writer.add_image("ground truth", make_grid(im), i)
+            writer.add_image("ground truth", make_grid(im), i)
             writer.add_image("reconstruction", make_grid(im_pred), i)
+
+    # for i in range(360):
+    #     with torch.no_grad():
+    #         # im, depth, v, masks, intrinsics = _prepare_batch(batch, device=device, non_blocking=True)
+    #         # -0.5 + i/360 - 0.2 + 4*i/3600
+    #         v = torch.tensor([0., 0., 0,
+    #                           math.sin(0 * math.pi / 180), math.cos(0 * math.pi / 180),
+    #                           math.sin(0 * math.pi / 180), math.cos(0 * math.pi / 180),
+    #                           math.sin(i * math.pi / 180), math.cos(i * math.pi / 180)],
+    #                          device=device)
+    #         x_pred = model_dec(v)
+    #
+    #         # send to cpu
+    #         # im = im.detach().cpu().float()
+    #         im_pred = x_pred.detach().cpu().float()
+    #         # writer.add_image("ground truth", make_grid(im), i)
+    #         writer.add_image("reconstruction", make_grid(im_pred), i)
 
     writer.close()
 
@@ -112,7 +122,7 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu,
     optim_enc = torch.optim.Adam(model_enc.parameters(), lr=1e-3)
     optim_dec = torch.optim.Adam(model_dec.parameters(), lr=1e-3)
 
-    pose_xfrm_sampler = PoseTransformSampler(pos_mode='XYZ', orient_mode='XYZ')
+    pose_xfrm_sampler = PoseTransformSampler(pos_mode='X', orient_mode='Z')
     mixup_sampler = Beta(2.0, 2.0)
 
     # create engines
@@ -135,7 +145,7 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu,
     metric_names = ["loss_enc", "loss_dec", "loss_recon"]
     pbar.attach(trainer_engine, metric_names=metric_names)
 
-    # tensorboard --logdir=log/base_restrict_all --host=127.0.0.1 --samples_per_plugin images=360
+    # tensorboard --logdir=log/restricted_yz_xy_pert_enc --host=127.0.0.1 --samples_per_plugin images=360
 
     @trainer_engine.on(Events.STARTED)
     def load_latest_checkpoint(engine):
@@ -177,41 +187,40 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu,
             x, d, v, masks, intr = _prepare_batch(batch, device=device, non_blocking=True)
             b, c, h, w = x.size()
 
-            v_pred = model_enc(torch.cat([x, d], dim=1))
+            v_pred, t_c = model_enc(x)
+            vc_pred = xfrm_pose(v_pred, t_c)
             o = torch.cat([torch.atan2(v[:, 3], v[:, 4]).unsqueeze(-1),
                           torch.atan2(v[:, 5], v[:, 6]).unsqueeze(-1),
                           torch.atan2(v[:, 7], v[:, 8]).unsqueeze(-1)], dim=-1)
             p = v[:, :3]
-            o_pred = torch.cat([torch.atan2(v_pred[:, 3], v_pred[:, 4]).unsqueeze(-1),
-                                torch.atan2(v_pred[:, 5], v_pred[:, 6]).unsqueeze(-1),
-                                torch.atan2(v_pred[:, 7], v_pred[:, 8]).unsqueeze(-1)], dim=-1)
-            p_pred = v_pred[:, :3]
-
-            print(torch.cat([(p - p.roll(1, dims=0)), (o - o.roll(1, dims=0))*180/math.pi], dim=1))
-            print(torch.cat([(p_pred - p_pred.roll(1, dims=0)), (o_pred - o_pred.roll(1, dims=0))*180/math.pi], dim=1))
+            o_pred = torch.cat([torch.atan2(vc_pred[:, 3], vc_pred[:, 4]).unsqueeze(-1),
+                                torch.atan2(vc_pred[:, 5], vc_pred[:, 6]).unsqueeze(-1),
+                                torch.atan2(vc_pred[:, 7], vc_pred[:, 8]).unsqueeze(-1)], dim=-1)
+            p_pred = vc_pred[:, :3]
+            # print(torch.cat([(p - p.roll(1, dims=0)), (o - o.roll(1, dims=0))*180/math.pi], dim=1))
+            # print(torch.cat([(p_pred - p_pred.roll(1, dims=0)), (o_pred - o_pred.roll(1, dims=0))*180/math.pi], dim=1))
             # print(v, v_pred)
-            x_pred, d_pred = model_dec(v_pred)
+            x_pred = model_dec(vc_pred)
 
-            # v_pert = pose_xfrm_sampler(v_pred)
-            # v_xfrm = xfrm_pose(v_pred, v_pert)
-            # x_geo_xfrm = geo_xfrm(x, d, v_pert)
-            # x_model_xfrm, d_model_xfrm = model_dec(v_xfrm)
+            t_pert, axis = pose_xfrm_sampler(v)
+            v_pert = xfrm_pose(v, t_pert)
+            x_geo_xfrm = geo_xfrm(x, d, t_pert)
+            x_model_xfrm = model_dec(v_pert)
             # x_model_xfrm = x_model_xfrm.where(x_geo_xfrm > 0, torch.tensor([0.], device=x_geo_xfrm.device))
 
             # send to cpu
             x = x.detach().cpu().float()
             x_pred = x_pred.detach().cpu().float()
-            d_pred = d_pred.detach().cpu().float()
-            # x_geo_xfrm = x_geo_xfrm.detach().cpu().float()
-            # x_model_xfrm = x_model_xfrm.detach().cpu().float()
-
+            # d_pred = d_pred.detach().cpu().float()
+            x_geo_xfrm = x_geo_xfrm.detach().cpu().float()
+            x_model_xfrm = x_model_xfrm.detach().cpu().float()
 
             writer.add_image("ground truth", make_grid(x), engine.state.epoch)
             writer.add_image("reconstruction", make_grid(x_pred), engine.state.epoch)
             # writer.add_image("ground truth_depth", make_grid(x_pred_rel), engine.state.epoch)
             # writer.add_image("reconstruction_depth", make_grid(x_mix_pred_rel), engine.state.epoch)
-            # writer.add_image("geo transformed", make_grid(x_geo_xfrm), engine.state.epoch)
-            # writer.add_image("model transformed", make_grid(x_model_xfrm), engine.state.epoch)
+            writer.add_image("geo transformed", make_grid(x_geo_xfrm), engine.state.epoch)
+            writer.add_image("model transformed", make_grid(x_model_xfrm), engine.state.epoch)
 
     @trainer_engine.on(Events.EPOCH_COMPLETED)
     def log_validation_metrics(engine):
@@ -300,14 +309,6 @@ def rel_pose_xfrm(v1, v2):
     v1v2_mat = torch.matmul(torch.inverse(wv1_mat), wv2_mat)
     return geo.mat_to_xfrm(v1v2_mat)
 
-def pose_to_euler(v):
-    p = v[:, :3]
-    o = torch.cat([torch.atan2(v[:, 3], v[:, 4]).unsqueeze(-1),
-                   torch.atan2(v[:, 5], v[:, 6]).unsqueeze(-1),
-                   torch.atan2(v[:, 7], v[:, 8]).unsqueeze(-1)], dim=-1) *180/math.pi
-    return torch.cat([p, o], dim=1)
-
-
 def rploss(v_pred, v):
     t0_rel = rel_pose_xfrm(v, v.roll(1, dims=0))
     t1_rel = rel_pose_xfrm(v, v.roll(2, dims=0))
@@ -324,6 +325,16 @@ def rploss(v_pred, v):
     loss = ((2 * e0[:, :3].norm(dim=1) + e0[:, 3:].norm(dim=1)) + \
            (2 * e1[:, :3].norm(dim=1) + e1[:, 3:].norm(dim=1)) + \
            (2 * e2[:, :3].norm(dim=1) + e2[:, 3:].norm(dim=1))).mean()
+    return loss
+
+
+def pertloss(v_pose, v_geo):
+    # pred_rel = rel_pose_xfrm(v_pred, v)
+    # axis_idx = "XYZ".index(axis)
+    # loss = 10 * pred_rel[:, :3].abs().mean()
+    v_geo[:, :3] = 10 * v_geo[:, :3]
+    v_pose[:, :3] = 10 * v_pose[:, :3]
+    loss = 10 * F.mse_loss(v_geo, v_pose)
     return loss
 
 
@@ -344,52 +355,42 @@ def create_trainer_engine(model_enc, optim_enc, model_dec, optim_dec, xfrm_sampl
         lambda_ = mixup_sampler.sample()
         mixup_shift = random.randint(1, x.size(0))
         # Infer pose
-        v_pred = model_enc(torch.cat([x, d], dim=1))
+        v_pred, t_c = model_enc(x)
+        vc_pred = xfrm_pose(v_pred, t_c)
         # Regenerate Image from pose
-        x_pred, d_pred, x_mix_pred, d_mix_pred = model_dec(v_pred, shift=mixup_shift, lambda_=lambda_)
+        x_pred, x_mix_pred = model_dec(vc_pred, shift=mixup_shift, lambda_=lambda_)
         x_mix = model_dec.mix(x, x.roll(mixup_shift, dims=0), lambda_)
-        d_mix = model_dec.mix(d, d.roll(mixup_shift, dims=0), lambda_)
 
         # Regeneration loss
-        loss_recon = (- torch.mean(torch.mean(Normal(x_pred, 1.0).log_prob(x), dim=[1, 2, 3])) - \
-                       torch.mean(torch.mean(Normal(d_pred, 1.0).log_prob(d), dim=[1, 2, 3])) - \
-                       torch.mean(torch.mean(Normal(x_mix_pred, 1.0).log_prob(x_mix), dim=[1, 2, 3])) - \
-                       torch.mean(torch.mean(Normal(d_mix_pred, 1.0).log_prob(d_mix), dim=[1, 2, 3])))/4
+        loss_recon = (- torch.mean(torch.mean(Normal(x_pred, 1.0).log_prob(x), dim=[1, 2, 3])) -
+                      torch.mean(torch.mean(Normal(x_mix_pred, 1.0).log_prob(x_mix), dim=[1, 2, 3])))/2
 
         ###
         # Inductive biases
         #   Relative pose loss
-        loss_rel = rploss(v_pred, v)
-        # loss_rel = (F.mse_loss(t0_pred_rel, t0_rel) + \
-        #            F.mse_loss(t1_pred_rel, t1_rel) + \
-        #            F.mse_loss(t2_pred_rel, t2_rel)) / 3 + 0.5*F.mse_loss(t_mix_pred_rel, t_mix_rel)
-        # v_pred_rel = xfrm_pose(v_pred, t_rel)
-        # x_rel = x.roll(1, dims=0)
-        # d_rel = d.roll(1, dims=0)
-        # x_mix_rel = model_dec.mix(x, x.roll(mixup_shift, dims=0), lambda_).roll(1, dims=0)
-        # d_mix_rel = model_dec.mix(d, d.roll(mixup_shift, dims=0), lambda_).roll(1, dims=0)
-        # x_pred_rel, d_pred_rel, \
-        # x_mix_pred_rel, d_mix_pred_rel = model_dec(v_pred_rel, shift=mixup_shift, lambda_=lambda_)
-        #
-        # loss_rel = - torch.mean(torch.sum(Normal(x_pred_rel, 1.0).log_prob(x_rel), dim=[1, 2, 3])) - \
-        #              torch.mean(torch.sum(Normal(d_pred_rel, 1.0).log_prob(d_rel), dim=[1, 2, 3])) - \
-        #              torch.mean(torch.sum(Normal(x_mix_pred_rel, 1.0).log_prob(x_mix_rel), dim=[1, 2, 3])) - \
-        #              torch.mean(torch.sum(Normal(d_mix_pred_rel, 1.0).log_prob(d_mix_rel), dim=[1, 2, 3]))
+        # loss_rel = rploss(v_pred, v)
+        _x_pred = model_dec(v_pred)
+        _x = model_dec(v)
+        loss_rel = F.mse_loss(_x_pred, _x)
 
         #   Pose perturbation loss
-        # t_pert = xfrm_sampler(v_pred)
-        # v_pred_pert = xfrm_pose(v_pred, t_pert)
-        # x_pred_pert, *_ = model_dec(v_pred_pert, shift=mixup_shift, lambda_=lambda_)
-        # x_geo_xfrm = geo_xfrm(x_pred, d_pred, t_pert)
-        # x_pred_pert = x_pred_pert.where(x_geo_xfrm > 0., torch.tensor([0.], device=x_geo_xfrm.device))
-        # loss_pert = - torch.mean(torch.sum(Normal(x_pred_pert, 1.0).log_prob(x_geo_xfrm), dim=[1, 2, 3]))
-        ###
-        loss_pert = 0.0
+        t_pert, error_axis = xfrm_sampler(vc_pred)
+        vc_pert_pose = xfrm_pose(vc_pred, t_pert)
+        x_pose_xfrm = model_dec(vc_pert_pose)
+        x_geo_xfrm = geo_xfrm(x, d, t_pert)
+        # v_pert_geo, t_c = model_enc(x_geo_xfrm)
+        # vc_pert_geo = xfrm_pose(v_pert_geo, t_c)
+        # x_pose_xfrm = model_dec(v_pert_pose)
+        x_pose_xfrm = x_pose_xfrm.where(x_geo_xfrm > 0, torch.tensor([0.], device=x_geo_xfrm.device))
+        # loss_pert = - torch.mean(torch.mean(Normal(x_pose_xfrm, 1.0).log_prob(x_geo_xfrm), dim=[1, 2, 3]))
+        loss_pert = F.mse_loss(x_pose_xfrm, x_geo_xfrm)
+        # loss_pert = pertloss(vc_pert_pose, vc_pert_geo)
+
         # Decoder loss
         loss_dec = loss_recon
         # loss_dec = loss_recon + loss_mixup
         # Encoder loss
-        loss_enc = loss_rel + 0*loss_recon
+        loss_enc = loss_rel + loss_pert + 0 * loss_recon
         # loss_enc = loss_recon + loss_mixup
         # loss = loss_recon + loss_mixup + loss_rel + loss_pert
 
@@ -402,8 +403,7 @@ def create_trainer_engine(model_enc, optim_enc, model_dec, optim_dec, xfrm_sampl
         optim_enc.zero_grad()
         loss_enc.backward()
         optim_enc.step()
-
-        return {"loss_enc": loss_enc, "loss_dec": loss_dec,
+        return {"loss_enc": loss_enc, "loss_dec": loss_pert,
                 "loss_recon": F.mse_loss(x_pred, x)}
 
     engine = Engine(_update)
@@ -438,8 +438,9 @@ def create_evaluator_engine(model_enc, model_dec, device=None, non_blocking=Fals
         model_dec.eval()
         with torch.no_grad():
             x, d, v, masks, intr = _prepare_batch(batch, device=device, non_blocking=non_blocking)
-            v_pred = model_enc(torch.cat([x, d], dim=1))
-            x_pred, d_pred = model_dec(v_pred)
+            v_pred, t_c= model_enc(x)
+            vc_pred = xfrm_pose(v_pred, t_c)
+            x_pred = model_dec(vc_pred)
 
             return {"loss_recon": F.mse_loss(x_pred, x)}
 

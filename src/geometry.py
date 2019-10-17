@@ -157,38 +157,37 @@ def transform_points(points, xfrm, orient_mode="sc_euler"):
     points_transformed = kornia.transform_points(xfrm_mat, points)
     return points_transformed.view(b, h, w, 3)
 
-
 def depth_2_point(depth, scaling_factor=1, focal_length=0.03):
     dev = depth.device
     b, c, h, w = depth.size()
-    sx = sy = 0.036
+    sx = sz = 0.036
     f_x = w / sx * focal_length
-    f_y = h / sy * focal_length
-    c_x = (depth.size(-1) - 1) / 2.0
-    c_y = (depth.size(-2) - 1) / 2.0
-    z_pos = (1 - depth) * scaling_factor
-    y_pos = torch.arange(-c_y, c_y + 1, device=dev).view(-1, 1).repeat(b, c, 1, w) * z_pos / f_x
-    x_pos = torch.arange(-c_x, c_x + 1, device=dev).repeat(b, c, h, 1) * z_pos / f_y
+    f_z = h / sz * focal_length
+    c_x = (w - 1) / 2.0
+    c_z = (h - 1) / 2.0
+    y_pos = (1 - depth) * scaling_factor
+    z_pos = - torch.arange(-c_z, c_z + 1, device=dev).view(-1, 1).repeat(b, c, 1, w) * y_pos / f_z
+    x_pos = torch.arange(-c_x, c_x + 1, device=dev).repeat(b, c, h, 1) * y_pos / f_x
 
     return torch.cat([x_pos, y_pos, z_pos], dim=1).permute(0, 2, 3, 1).view(b, h, w, 3)
 
 
 def point_2_pixel(point, scaling_factor, focal_length=0.05):
     b, h, w, _  = point.shape
-    sx = sy = 0.036
+    sx = sz = 0.036
     f_x = w / sx * focal_length
-    f_y = h / sy * focal_length
+    f_z = h / sz * focal_length
     c_x = (w - 1) / 2.0
-    c_y = (h - 1) / 2.0
+    c_z = (h - 1) / 2.0
 
     x_pos = point[..., 0]
     y_pos = point[..., 1]
     z_pos = point[..., 2]
 
-    u = x_pos * f_x / z_pos + c_x
-    v = y_pos * f_y / z_pos + c_y
+    u = x_pos * f_x / y_pos + c_x
+    v = - z_pos * f_z / y_pos + c_z
     u_norm = (u - c_x) / c_x
-    v_norm = (v - c_y) / c_y
+    v_norm = (v - c_z) / c_z
 
     return torch.cat([u_norm.unsqueeze(-1), v_norm.unsqueeze(-1)], dim=-1)
 
