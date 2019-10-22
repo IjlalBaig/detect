@@ -45,7 +45,7 @@ class BasicBlock(nn.Module):
         # Both self.conv1 and self.downsample layers downsample the input when stride != 1
         self.conv1 = conv3x3(inplanes, planes, stride)
         self.bn1 = norm_layer(planes)
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = nn.ReLU(inplace=False)
         self.conv2 = conv3x3(planes, planes)
         self.bn2 = norm_layer(planes)
         self.downsample = downsample
@@ -58,8 +58,8 @@ class BasicBlock(nn.Module):
         out = self.bn1(out)
         out = self.relu(out)
 
-        out = self.conv2(out)
-        out = self.bn2(out)
+        # out = self.conv2(x)
+        # out = self.bn2(out)
 
         if self.downsample is not None:
             identity = self.downsample(x)
@@ -134,11 +134,11 @@ class TransBasicBlock(nn.Module):
     def forward(self, x):
         residual = x
 
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = self.relu(out)
+        # out = self.conv1(x)
+        # out = self.bn1(out)
+        # out = self.relu(out)
 
-        out = self.conv2(out)
+        out = self.conv2(x)
         out = self.bn2(out)
 
         if self.upsample is not None:
@@ -246,6 +246,7 @@ class DetectNetEncoder(nn.Module):
         self.layer4 = self._make_layer(block, 512, layers[3], stride=2, dilate=replace_stride_with_dilation[2])
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Linear(512 * block.expansion, v_dim)
+        self.drop1d = nn.Dropout(0.8)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -293,20 +294,8 @@ class DetectNetEncoder(nn.Module):
     def mix(self, a, b, lambda_):
         return lambda_*a + (1-lambda_)*b
 
-    def forward(self, x):
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
-        x = self.maxpool(x)
-        x = F.relu(self.layer1(x))
-        x = F.relu(self.layer2(x))
-        x_ = F.relu(self.layer3(x))
-        x = self.layer4(x_)
-        x = self.avgpool(x)
-        x = x.reshape(x.size(0), -1)
-        x = self.fc(x)
-
-        p, o = x.split([3, 6], dim=-1)
+    def normalize_pose(self, v):
+        p, o = v.split([3, 6], dim=-1)
         o_x = torch.atan2(o[:, 0], o[:, 1])
         o_y = torch.atan2(o[:, 2], o[:, 3])
         o_z = torch.atan2(o[:, 4], o[:, 5])
@@ -316,16 +305,18 @@ class DetectNetEncoder(nn.Module):
         c_y = torch.cos(o_y).unsqueeze(-1)
         s_z = torch.sin(o_z).unsqueeze(-1)
         c_z = torch.cos(o_z).unsqueeze(-1)
-
-        x = torch.cat([p, s_x, c_x, s_y, c_y, s_z, c_z], dim=1)
+        v = torch.cat([p, s_x, c_x, s_y, c_y, s_z, c_z], dim=1)
         # x[:, 0] = 0.
         # x[:, 1] = 0.
-        x[:, 2] = 1.5
+        v[:, 2] = 1.5
 
-        x[:, 3] = 0.
-        x[:, 4] = 1.
-        x[:, 5] = 0.
-        x[:, 6] = 1.
+        v[:, 3] = 0.
+        v[:, 4] = 1.
+        v[:, 5] = 0.
+        v[:, 6] = 1.
+        return v
+
+    def predict_calib(self, x):
         t, r = torch.split(self.calib(torch.ones(x.size(0), 1, device=x.device)), [3, 3], dim=1)
         s_x = torch.sin(r[:, 0]).unsqueeze(-1)
         c_x = torch.cos(r[:, 0]).unsqueeze(-1)
@@ -339,18 +330,49 @@ class DetectNetEncoder(nn.Module):
         k[:, 4] = 1.
         k[:, 5] = 0.
         k[:, 6] = 1.
+        return k
 
-        return x, k
+    def forward(self, x, shift=None, lambda_=None):
+        input = x
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
+        x = F.relu(self.layer1(x))
+        x = F.relu(self.layer2(x))
+        x = F.relu(self.layer3(x))
+        x = self.layer4(x)
+        x_ = self.avgpool(x)
+        x = x_.reshape(x_.size(0), -1)
+        x = self.fc(x)
+        x = self.normalize_pose(x)
+        k = self.predict_calib(x)
+
+        if shift is None or lambda_ is None:
+            return x, k
+        else:
+            z = self.mix(input, input.roll(shift, dims=0), lambda_)
+            z = self.conv1(z)
+            z = self.bn1(z)
+            z = self.relu(z)
+            z = self.maxpool(z)
+            z = F.relu(self.layer1(z))
+            z = F.relu(self.layer2(z))
+            z = F.relu(self.layer3(z))
+            z = self.layer4(z)
+            z = self.avgpool(z)
+            z_mix = self.mix(x_, x_.roll(shift, dims=0), lambda_)
+            return x, k, F.mse_loss(z_mix, z)
+
 
 
 class DetectNetDecoder(nn.Module):
     def __init__(self, trans_block, trans_layers, v_dim=6, zero_init_residual=False):
         super(DetectNetDecoder, self).__init__()
         self.inplanes = 64
-        self.conv_prior = nn.Conv2d(16+64, 128, kernel_size=3, stride=1, padding=1)
         # Decoder Section
         self.fc = nn.Sequential(
-            nn.Linear(v_dim, 1024)
+            nn.Linear(v_dim, 4096) #todo 1024
         )
         self.trans_layer1 = self._make_transpose(trans_block, 512, trans_layers[0], stride=2)
         self.trans_layer2 = self._make_transpose(trans_block, 256, trans_layers[1], stride=2)
@@ -403,7 +425,7 @@ class DetectNetDecoder(nn.Module):
 
     def forward(self, v, shift=None, lambda_=None):
         x = self.fc(v)
-        x = x.view(-1, 64, 4, 4)
+        x = x.view(-1, 64, 8, 8) # todo 4,4
         x = self.trans_layer1(x)
         x = F.relu(self.trans_layer2(x))
         x = F.relu(self.trans_layer3(x))
