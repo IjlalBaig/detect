@@ -58,8 +58,8 @@ class BasicBlock(nn.Module):
         out = self.bn1(out)
         out = self.relu(out)
 
-        # out = self.conv2(x)
-        # out = self.bn2(out)
+        out = self.conv2(out)
+        out = self.bn2(out)
 
         if self.downsample is not None:
             identity = self.downsample(x)
@@ -134,11 +134,11 @@ class TransBasicBlock(nn.Module):
     def forward(self, x):
         residual = x
 
-        # out = self.conv1(x)
-        # out = self.bn1(out)
-        # out = self.relu(out)
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
 
-        out = self.conv2(x)
+        out = self.conv2(out)
         out = self.bn2(out)
 
         if self.upsample is not None:
@@ -213,6 +213,39 @@ class Conv2dLSTMCell(nn.Module):
 
         return cell, hidden
 
+class DetectNetCalib(nn.Module):
+    def __init__(self, pos_mode="XYZ", orient_mode="XYZ"):
+        super(DetectNetCalib, self).__init__()
+        self.pos_mode = pos_mode
+        self.orient_mode = orient_mode
+        self.calib = nn.Linear(1, 6)
+
+    def forward(self, x):
+        t, r = torch.split(self.calib(torch.ones(x.size(0), 1, device=x.device)), [3, 3], dim=1)
+        s_x = torch.sin(r[:, 0]).unsqueeze(-1)
+        c_x = torch.cos(r[:, 0]).unsqueeze(-1)
+        s_y = torch.sin(r[:, 1]).unsqueeze(-1)
+        c_y = torch.cos(r[:, 1]).unsqueeze(-1)
+        s_z = torch.sin(r[:, 2]).unsqueeze(-1)
+        c_z = torch.cos(r[:, 2]).unsqueeze(-1)
+        k = torch.cat([t, s_x, c_x, s_y, c_y, s_z, c_z], dim=1)
+        if "X" not in self.pos_mode:
+            k[:, 0] = 0.0
+        if "Y" not in self.pos_mode:
+            k[:, 1] = 0.0
+        if "Z" not in self.pos_mode:
+            k[:, 2] = 0.0
+        if "X" not in self.orient_mode:
+            k[:, 3] = 0.0
+            k[:, 4] = 1.0
+        if "Y" not in self.orient_mode:
+            k[:, 5] = 0.0
+            k[:, 6] = 1.0
+        if "Z" not in self.orient_mode:
+            k[:, 7] = 0.0
+            k[:, 8] = 1.0
+        return k
+
 
 class DetectNetEncoder(nn.Module):
     def __init__(self, block, layers, v_dim=6, zero_init_residual=False, groups=1,
@@ -221,7 +254,7 @@ class DetectNetEncoder(nn.Module):
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
 
-        self.calib = nn.Linear(1, 6)
+        # self.calib = nn.Linear(1, 6)
         self._norm_layer = norm_layer
         self.inplanes = 64
         self.dilation = 1
@@ -316,21 +349,21 @@ class DetectNetEncoder(nn.Module):
         v[:, 6] = 1.
         return v
 
-    def predict_calib(self, x):
-        t, r = torch.split(self.calib(torch.ones(x.size(0), 1, device=x.device)), [3, 3], dim=1)
-        s_x = torch.sin(r[:, 0]).unsqueeze(-1)
-        c_x = torch.cos(r[:, 0]).unsqueeze(-1)
-        s_y = torch.sin(r[:, 1]).unsqueeze(-1)
-        c_y = torch.cos(r[:, 1]).unsqueeze(-1)
-        s_z = torch.sin(r[:, 2]).unsqueeze(-1)
-        c_z = torch.cos(r[:, 2]).unsqueeze(-1)
-        k = torch.cat([t, s_x, c_x, s_y, c_y, s_z, c_z], dim=1)
-        k[:, 1] = k[:, 2] = 0
-        k[:, 3] = 0.
-        k[:, 4] = 1.
-        k[:, 5] = 0.
-        k[:, 6] = 1.
-        return k
+    # def predict_calib(self, x):
+    #     t, r = torch.split(self.calib(torch.ones(x.size(0), 1, device=x.device)), [3, 3], dim=1)
+    #     s_x = torch.sin(r[:, 0]).unsqueeze(-1)
+    #     c_x = torch.cos(r[:, 0]).unsqueeze(-1)
+    #     s_y = torch.sin(r[:, 1]).unsqueeze(-1)
+    #     c_y = torch.cos(r[:, 1]).unsqueeze(-1)
+    #     s_z = torch.sin(r[:, 2]).unsqueeze(-1)
+    #     c_z = torch.cos(r[:, 2]).unsqueeze(-1)
+    #     k = torch.cat([t, s_x, c_x, s_y, c_y, s_z, c_z], dim=1)
+    #     k[:, 1] = k[:, 2] = 0
+    #     k[:, 3] = 0.
+    #     k[:, 4] = 1.
+    #     k[:, 5] = 0.
+    #     k[:, 6] = 1.
+    #     return k
 
     def forward(self, x, shift=None, lambda_=None):
         input = x
@@ -340,30 +373,24 @@ class DetectNetEncoder(nn.Module):
         x = self.maxpool(x)
         x = F.relu(self.layer1(x))
         x = F.relu(self.layer2(x))
-        x = F.relu(self.layer3(x))
-        x = self.layer4(x)
-        x_ = self.avgpool(x)
-        x = x_.reshape(x_.size(0), -1)
+        x_ = F.relu(self.layer3(x))
+        x = self.layer4(x_)
+        x = self.avgpool(x)
+        x = x.reshape(x.size(0), -1)
         x = self.fc(x)
         x = self.normalize_pose(x)
-        k = self.predict_calib(x)
+        # k = self.predict_calib(x)
 
         if shift is None or lambda_ is None:
-            return x, k
+            return x
         else:
-            z = self.mix(input, input.roll(shift, dims=0), lambda_)
-            z = self.conv1(z)
-            z = self.bn1(z)
-            z = self.relu(z)
-            z = self.maxpool(z)
-            z = F.relu(self.layer1(z))
-            z = F.relu(self.layer2(z))
-            z = F.relu(self.layer3(z))
-            z = self.layer4(z)
-            z = self.avgpool(z)
-            z_mix = self.mix(x_, x_.roll(shift, dims=0), lambda_)
-            return x, k, F.mse_loss(z_mix, z)
-
+            x_mix = self.mix(x_, x_.roll(shift, dims=0), lambda_)
+            x_mix = self.layer4(x_mix)
+            x_mix = self.avgpool(x_mix)
+            x_mix = x_mix.reshape(x_mix.size(0), -1)
+            x_mix = self.fc(x_mix)
+            x_mix = self.normalize_pose(x_mix)
+            return x, x_mix
 
 
 class DetectNetDecoder(nn.Module):
@@ -500,15 +527,16 @@ class Priori(nn.Module):
         return x
 
 
-def detectnet(v_dim=9):
+def detectnet(v_dim=9, pos_mode="XYZ", orient_mode="XYZ"):
     """Constructs a ResNet-18 model.
 
     Args:
         pretrained (bool): If True, returns a model pre-trained on ImageNet
         progress (bool): If True, displays a progress bar of the download to stderr
     """
-    return DetectNetEncoder(BasicBlock, [1, 1, 1, 1], v_dim=v_dim), \
-           DetectNetDecoder(TransBasicBlock, [1, 1, 1, 1], v_dim=v_dim)
+    return DetectNetEncoder(BasicBlock, [2, 2, 2, 2], v_dim=v_dim), \
+           DetectNetDecoder(TransBasicBlock, [1, 1, 1, 1], v_dim=v_dim),\
+           DetectNetCalib(pos_mode=pos_mode, orient_mode=orient_mode)
 
 
 

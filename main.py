@@ -13,7 +13,7 @@ if __name__ == "__main__":
     parser.add_argument("--data_dir", type=str, help="location of data", default="data")
     parser.add_argument("--log_dir", type=str, help="location of logging", default="log")
     parser.add_argument("--fractions", type=tuple, help="how much of the data to use for (training, validation, test)",
-                        default=(0.8, 0.1, 0.1))
+                        default=(0.88, 0.1, 0.02))
     parser.add_argument("--workers", type=int, help="number of data loading workers", default=2)
     parser.add_argument("--use_gpu", type=bool, help="whether to parallelise(default: True)", default=True)
     args = parser.parse_args()

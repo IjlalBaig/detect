@@ -1,4 +1,4 @@
-from ignite.metrics import Metric
+from ignite.metrics import Metric, EpochMetric
 from ignite.engine import Engine, Events
 import torch
 
@@ -30,7 +30,7 @@ class EpochAverage(Metric):
 
     """
 
-    def __init__(self, src=None,output_transform=None):
+    def __init__(self, src=None, output_transform=None):
         self._iterations = 0
         if not (isinstance(src, Metric) or src is None):
             raise TypeError("Argument src should be a Metric or None.")
@@ -53,8 +53,10 @@ class EpochAverage(Metric):
         self._value = None
         self._iterations = 0
 
+
     def update(self, output):
         # Implement abstract method
+
         pass
 
     def compute(self):
@@ -65,6 +67,8 @@ class EpochAverage(Metric):
         return self._value
 
     def attach(self, engine, name):
+        # avg error
+        engine.add_event_handler(Events.COMPLETED, self.ended, name)
         # restart average every epoch
         engine.add_event_handler(Events.EPOCH_STARTED, self.started)
         # compute metric
@@ -72,16 +76,20 @@ class EpochAverage(Metric):
         # apply running average
         engine.add_event_handler(Events.ITERATION_COMPLETED, self.completed, name)
         engine.add_event_handler(Events.ITERATION_COMPLETED, self.iteration_count)
-        # avg error
-        engine.add_event_handler(Events.EPOCH_COMPLETED, self.ended)
+
+    def completed(self, engine, name):
+        result = self.compute()
+        if torch.is_tensor(result) and len(result.shape) == 0:
+            result = result.item()
 
     def iteration_count(self, engine):
         # because half of size is for query and half for compute
         # self._iterations += engine.state.batch[list(engine.state.batch.keys())[0]].size(0) / 2
         self._iterations += 1
 
-    def ended(self, engine):
-        self._value /= self._iterations
+    def ended(self, engine, name):
+        if torch.is_tensor(self._value) and len(self._value.shape) == 0:
+            engine.state.metrics[name] = self._value / self._iterations
 
     def _get_metric_value(self):
         return self.src.compute()
@@ -156,7 +164,9 @@ class EpochMax(Metric):
         if self._value is None:
             self._value, _ = self._get_src_value().max(dim=0)
         else:
-            self._value, _ = torch.cat([self._get_src_value(), self._value.unsqueeze(dim=0)], dim=0).max(dim=0)
+            new_value = self._get_src_value().max(0)[0]
+            if new_value > self._value:
+                self._value = new_value
         return self._value
 
     def attach(self, engine, name):
