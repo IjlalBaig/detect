@@ -122,7 +122,7 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu,
 
     train_loader, val_loader, _ = get_data_loaders(dpath=data_dir, fractions=fractions, im_mode="RGB",
                                                    batch_sizes=batch_sizes, num_workers=workers,
-                                                   im_dims=(128, 128), standardize=standardize)
+                                                   im_dims=(256, 256), standardize=standardize)
 
     # Create model and optimizer
     model_enc, model_dec, model_cal = detectnet(9, pos_mode=pos_mode, orient_mode=orient_mode)
@@ -400,19 +400,19 @@ def create_trainer_engine(model_enc, optim_enc, model_cal, optim_cal, model_dec,
         mixup_shift = random.randint(1, x.size(0))
         # Infer pose
         v_pred, v_mix_pred = model_enc(x, mixup_shift, lambda_)
-        t_c = model_cal(x)
+        # t_c = model_cal(x)
 
-        v_pred_copy = v_pred.clone().detach().requires_grad_(False)
-        vc_pred = xfrm_pose(v_pred_copy, t_c)
+        # v_pred_copy = v_pred.clone().detach().requires_grad_(False)
+        # vc_pred = xfrm_pose(v_pred_copy, t_c)
         # Regenerate Image from pose
 
-        x_pred, x_mix_pred = model_dec(v_pred, shift=mixup_shift, lambda_=lambda_)
-        x_mix = model_dec.mix(x, x.roll(mixup_shift, dims=0), lambda_)
+        # x_pred, x_mix_pred = model_dec(v_pred, shift=mixup_shift, lambda_=lambda_)
+        # x_mix = model_dec.mix(x, x.roll(mixup_shift, dims=0), lambda_)
 
         # Regeneration loss
         # loss_recon = (- torch.mean(torch.mean(Normal(x_pred, 1.0).log_prob(x), dim=[1, 2, 3])) -
         #               torch.mean(torch.mean(Normal(x_mix_pred, 1.0).log_prob(x_mix), dim=[1, 2, 3])))/2
-        loss_recon = F.mse_loss(x_pred, x) + F.mse_loss(x_mix_pred, x_mix)
+        # loss_recon = F.mse_loss(x_pred, x) + F.mse_loss(x_mix_pred, x_mix)
         # loss_recon = 0.
 
         ###
@@ -424,23 +424,21 @@ def create_trainer_engine(model_enc, optim_enc, model_cal, optim_cal, model_dec,
 
 
         #   Pose perturbation loss
-        t_pert, error_axis = xfrm_sampler(vc_pred)
-        vc_pert_pose = xfrm_pose(vc_pred, t_pert)
-        x_geo_xfrm = geo_xfrm(x, d, t_pert)
-        model_enc.eval()
-        v_pert_geo = model_enc(x_geo_xfrm)
-        model_enc.train()
-        v_pert_geo_copy = v_pert_geo.clone().detach().requires_grad_(False)
-        vc_pert_geo = xfrm_pose(v_pert_geo_copy, t_c)
-
-        loss_pert = pertloss(vc_pert_pose, vc_pert_geo)
+        # t_pert, error_axis = xfrm_sampler(vc_pred)
+        # vc_pert_pose = xfrm_pose(vc_pred, t_pert)
+        # x_geo_xfrm = geo_xfrm(x, d, t_pert)
+        # model_enc.eval()
+        # v_pert_geo = model_enc(x_geo_xfrm)
+        # model_enc.train()
+        # v_pert_geo_copy = v_pert_geo.clone().detach().requires_grad_(False)
+        # vc_pert_geo = xfrm_pose(v_pert_geo_copy, t_c)
+        #
+        # loss_pert = pertloss(vc_pert_pose, vc_pert_geo)
         # Decoder loss
-        loss_dec = loss_recon
-        # loss_dec = loss_recon + loss_mixup
-        # Encoder loss
-        # loss_pert = 0.
-        loss_recon = 0.
-        loss_rel = F.mse_loss(v_pred, v)
+        # loss_dec = loss_recon
+        loss_recon = 0.0
+        loss_pert = 0.0
+        loss_rel = F.mse_loss(v_pred, v, reduction="sum")
 
         loss_enc = loss_rel + 0 * loss_recon
         # loss_enc = loss_recon + loss_mixup
@@ -448,13 +446,13 @@ def create_trainer_engine(model_enc, optim_enc, model_cal, optim_cal, model_dec,
 
         ###
         # Back-propagate propagation
-        optim_dec.zero_grad()
-        loss_dec.backward(retain_graph=True)
-        optim_dec.step()
+        # optim_dec.zero_grad()
+        # loss_dec.backward(retain_graph=True)
+        # optim_dec.step()
         #
-        optim_cal.zero_grad()
-        loss_pert.backward()
-        optim_cal.step()
+        # optim_cal.zero_grad()
+        # loss_pert.backward()
+        # optim_cal.step()
 
         optim_enc.zero_grad()
         loss_enc.backward()
