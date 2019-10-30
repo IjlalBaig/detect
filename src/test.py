@@ -371,8 +371,8 @@ class DetectNetEncoder(nn.Module):
         x = self.bn1(x)
         x = self.relu(x)
         # todo: remove later
-        x = self.conv2(x)
-        x = self.relu(x)
+        # x = self.conv2(x)
+        # x = self.relu(x)
         # end
         x = self.maxpool(x)
         x = F.relu(self.layer1(x))

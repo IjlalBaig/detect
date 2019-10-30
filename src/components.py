@@ -18,7 +18,7 @@ class PoseTransformSampler(nn.Module):
         self.pos_mode = pos_mode
         self.orient_var = orient_var
         self.orient_mode = orient_mode
-        self.sampler = Beta(0.5, 0.5)
+        self.sampler = Beta(0.2, 0.2)
 
     def sample_xfrm(self, v):
         xfrm = torch.zeros_like(v)
@@ -35,7 +35,7 @@ class PoseTransformSampler(nn.Module):
 
         elif error_axis is "Y":
             if "X" in self.pos_mode:
-                xfrm[..., 0] = self.pos_var * (self.sampler.sample() - 0.5) + xfrm[..., 0]
+               xfrm[..., 0] = self.pos_var * (self.sampler.sample() - 0.5) + xfrm[..., 0]
             if "Z" in self.orient_mode:
                 z_euler = self.orient_var * (self.sampler.sample() - 0.5)
                 xfrm[..., 7] = torch.sin(z_euler)
