@@ -127,7 +127,7 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu,
     # Create model and optimizer
     model_enc, model_dec, model_cal = detectnet(9, pos_mode=pos_mode, orient_mode=orient_mode)
     optim_enc = torch.optim.Adam(model_enc.parameters(), lr=5e-3)
-    optim_cal = torch.optim.Adam(model_cal.parameters(), lr=5e-3)
+    optim_cal = torch.optim.Adam(model_cal.parameters(), lr=1e-3)
     optim_dec = torch.optim.Adam(model_dec.parameters(), lr=5e-3)
 
     pose_xfrm_sampler = PoseTransformSampler(pos_mode=pos_mode, orient_mode=orient_mode)
@@ -202,47 +202,31 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu,
         with torch.no_grad():
             x, d, v, masks, intr = _prepare_batch(batch, device=device, non_blocking=True)
             b, c, h, w = x.size()
-            x_masked = mask_img_border(x.clone(), 25)
-            v_pred = model_enc(x_masked, shift=None, lambda_=None)
-            t_c = model_cal(x)
-            vc_pred = xfrm_pose(v_pred, t_c)
-            o = torch.cat([torch.atan2(v[:, 3], v[:, 4]).unsqueeze(-1),
-                          torch.atan2(v[:, 5], v[:, 6]).unsqueeze(-1),
-                          torch.atan2(v[:, 7], v[:, 8]).unsqueeze(-1)], dim=-1)
-            p = v[:, :3]
-            o_pred = torch.cat([torch.atan2(vc_pred[:, 3], vc_pred[:, 4]).unsqueeze(-1),
-                                torch.atan2(vc_pred[:, 5], vc_pred[:, 6]).unsqueeze(-1),
-                                torch.atan2(vc_pred[:, 7], vc_pred[:, 8]).unsqueeze(-1)], dim=-1)
-            p_pred = vc_pred[:, :3]
-            # print(torch.cat([(p - p.roll(1, dims=0)), (o - o.roll(1, dims=0))*180/math.pi], dim=1))
-            # print(torch.cat([(p_pred - p_pred.roll(1, dims=0)), (o_pred - o_pred.roll(1, dims=0))*180/math.pi], dim=1))
-            x_pred = model_dec(v_pred)
+            border = 28
+            x_ = x[:, :, border:-border, border:-border]
+            p, error_axis = pose_xfrm_sampler(v)
+            x_g = geo_xfrm(x, d, p)[:, :, border:-border, border:-border]
 
-            t_pert, axis = pose_xfrm_sampler(v)
-            v_c = xfrm_pose(v, t_c)
-            # v_pert = xfrm_pose(v_c, t_pert)
-            x_geo_xfrm = geo_xfrm(x, d, t_pert)
-            v_geo_xfrm = model_enc(x_geo_xfrm)
-            x_model_xfrm = model_dec(v_geo_xfrm)
-            # x_model_xfrm = x_model_xfrm.where(x_geo_xfrm > 0, torch.tensor([0.], device=x_geo_xfrm.device))
+            # x_masked = mask_img_border(x.clone(), 25)
+            v_l = model_enc(x_)
+            v_lg = model_enc(x_g)
 
-            # send to cpu
-            # x = x.detach().cpu().float()
-            x_pred = x_pred.detach().cpu().float()
-            # d_pred = d_pred.detach().cpu().float()
-            x_geo_xfrm = x_geo_xfrm.detach().cpu().float()
-            x_model_xfrm = x_model_xfrm.detach().cpu().float()
+            c = model_cal(x)
 
-            writer.add_image("ground truth", make_grid(x), engine.state.epoch)
-            writer.add_image("reconstruction", make_grid(x_pred), engine.state.epoch)
-            # writer.add_image("ground masked", make_grid(x_masked), engine.state.epoch)
-            # writer.add_image("reconstruction_depth", make_grid(x_mix_pred_rel), engine.state.epoch)
-            writer.add_image("geo transformed", make_grid(x_geo_xfrm), engine.state.epoch)
-            writer.add_image("model transformed", make_grid(x_model_xfrm), engine.state.epoch)
-            print(t_c)
-            writer.add_scalar("validation/{}".format("tx"), t_c[0, 0], engine.state.epoch)
-            writer.add_scalar("validation/{}".format("ty"), t_c[0, 1], engine.state.epoch)
-            writer.add_scalar("validation/{}".format("tpsi"), math.atan2(t_c[0, -2], t_c[0, -1])*180/math.pi, engine.state.epoch)
+            v_c = xfrm_pose(v_l, c)
+            v_cg = xfrm_pose(v_lg, c)
+
+            x_l = model_dec(v_l)
+            x_lg = model_dec(v_lg)
+
+            writer.add_image("ground truth", make_grid(x_g.detach().cpu().float()), engine.state.epoch)
+            writer.add_image("reconstruction", make_grid(x_.detach().cpu().float()), engine.state.epoch)
+            writer.add_image("geo transformed", make_grid(geo_xfrm(x, d, p).detach().cpu().float()), engine.state.epoch)
+            writer.add_image("model transformed", make_grid(x_lg.detach().cpu().float()), engine.state.epoch)
+
+            writer.add_scalar("validation/{}".format("tx"), c[0, 0], engine.state.epoch)
+            writer.add_scalar("validation/{}".format("ty"), c[0, 1], engine.state.epoch)
+            writer.add_scalar("validation/{}".format("tpsi"), math.atan2(c[0, -2], c[0, -1])*180/math.pi, engine.state.epoch)
 
     @trainer_engine.on(Events.EPOCH_COMPLETED)
     def log_validation_metrics(engine):
@@ -417,72 +401,63 @@ def create_trainer_engine(model_enc, optim_enc, model_cal, optim_cal, model_dec,
         #
         # loss_pert = pertloss(v_p, v_g)
         # v_c_pred_p = xfrm_pose(v_c_pred, p)
-        ####
+        # ####
+        border = 28
+        x_ = x[:, :, border:-border, border:-border]
 
+        p, error_axis = xfrm_sampler(v)
+        x_g = geo_xfrm(x, d, p)[:, :, border:-border, border:-border]
 
-        lambda_ = mixup_sampler.sample()
-        mixup_shift = random.randint(1, x.size(0))
         # Infer pose
-        v_pred, v_mix_pred = model_enc(x, mixup_shift, lambda_)
-        t_c = model_cal(x)
+        v_l = model_enc(x_)
+        v_lg = model_enc(x_g)
 
-        v_pred_copy = v_pred.clone().detach().requires_grad_(False)
-        model_cal.eval()
-        vc_pred = xfrm_pose(v_pred_copy, t_c)
-        model_cal.train()
-        # Regenerate Image from pose
-        v_pred_detached = v_pred.clone().detach().requires_grad_(True)
-        x_pred, x_mix_pred = model_dec(v_pred_detached, shift=mixup_shift, lambda_=lambda_)
-        # x_pred = model_dec(v_pred_detached)
-        x_mix = model_dec.mix(x, x.roll(mixup_shift, dims=0), lambda_)
+        c = model_cal(x)
 
-        # Regeneration loss
-        # loss_recon = (- torch.mean(torch.mean(Normal(x_pred, 1.0).log_prob(x), dim=[1, 2, 3])) -
-        #               torch.mean(torch.mean(Normal(x_mix_pred, 1.0).log_prob(x_mix), dim=[1, 2, 3])))/2
-        loss_recon = F.mse_loss(x_pred, x) + F.mse_loss(x_mix_pred, x_mix)
-        # loss_recon = 0.
+        v_c = xfrm_pose(v_l, c)
+        v_cg = xfrm_pose(v_lg, c)
 
-        ###
-        # #   Pose perturbation loss
-        t_pert, error_axis = xfrm_sampler(v_pred_copy)
-        vc_pert_pose = xfrm_pose(vc_pred, t_pert)
-        x_geo_xfrm = geo_xfrm(x, d, t_pert)
+        loss_pert = pertloss(xfrm_pose(v_c, p), v_cg)
+        # loss_pert = 0
+        loss_enc = F.mse_loss(v_l, v) + 0.0 * loss_pert
+        # ###
 
-        model_enc.eval()
-        v_pert_geo = model_enc(x_geo_xfrm)
-        model_enc.train()
+        # optim_cal.zero_grad()
+        # loss_pert.backward(retain_graph=True)
+        # optim_cal.step()
 
-        v_pert_geo_copy = v_pert_geo.clone().detach().requires_grad_(False)
-        model_cal.eval()
-        vc_pert_geo = xfrm_pose(v_pert_geo_copy, t_c)
-        model_cal.train()
+        # with torch.no_grad():
+        #     loss_pert = 0
+        #     loss_enc = 0
+        #     # c = torch.tensor([0.321, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.3255, 0.9455], device=x.device)
+        #     c = torch.tensor([0.65, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.8386, 0.5446], device=x.device)
+        #     border = 28
+        #     x_ = x[:, :, border:-border, border:-border]
         #
-        loss_pert = pertloss(vc_pert_pose, vc_pert_geo)
-        # Decoder loss
-        loss_dec = loss_recon
-        # loss_recon = 0.0
-        loss_rel = F.mse_loss(v_pred, v)
+        #     p, error_axis = xfrm_sampler(v)
+        #     x_g = geo_xfrm(x, d, p)[:, :, border:-border, border:-border]
+        #
+        #     # Infer pose
+        #     model_enc.eval()
+        #     v_l = model_enc(x_)
+        #     v_lg = model_enc(x_g)
+        #
+        #     v_c = xfrm_pose(v_l, c)
+        #     v_cg = xfrm_pose(v_lg, c)
+        #
+        #     loss_pert = pertloss(xfrm_pose(v_c, p), v_cg)
+        #
 
-        loss_enc = loss_rel
-        # loss_enc = loss_recon + loss_mixup
-        # loss = loss_recon + loss_mixup + loss_rel + loss_pert
-
-        ###
-        # Back-propagate propagation
-        optim_dec.zero_grad()
-        loss_dec.backward()
-        optim_dec.step()
-
-        optim_cal.zero_grad()
-        loss_pert.backward()
-        optim_cal.step()
-
-        optim_enc.zero_grad()
-        loss_enc.backward()
-        optim_enc.step()
+        # optim_cal.zero_grad()
+        # loss_pert.backward(retain_graph=True)
+        # optim_cal.step()
+        #
+        # optim_enc.zero_grad()
+        # loss_enc.backward()
+        # optim_enc.step()
 
         return {"loss_enc": loss_enc, "loss_dec": loss_pert,
-                "loss_recon": F.mse_loss(x_pred, x)}
+                "loss_recon": F.mse_loss(x, x)}
 
     engine = Engine(_update)
     # Add metrics
@@ -518,13 +493,13 @@ def create_evaluator_engine(model_enc, model_cal, model_dec, device=None, non_bl
         model_cal.eval()
         with torch.no_grad():
             x, d, v, masks, intr = _prepare_batch(batch, device=device, non_blocking=non_blocking)
-            v_pred = model_enc(x)
-            t_c = model_cal(x)
-            x.size(0)
-            # vc_pred = xfrm_pose(v_pred, t_c)
-            # x_pred = model_dec(vc_pred)
-            pos_disparity = (v_pred[:, :2] - v[:, :2]).abs().max(dim=1)[0]
-            orient_disparity = (torch.atan2(v_pred[:, -2], v_pred[:, -1]) - torch.atan2(v[:, -2], v[:, -1]))
+            border = 28
+            x_ = x[:, :, border:-border, border:-border]
+
+            v_l = model_enc(x_)
+
+            pos_disparity = (v_l[:, :2] - v[:, :2]).abs().max(dim=1)[0]
+            orient_disparity = (torch.atan2(v_l[:, -2], v_l[:, -1]) - torch.atan2(v[:, -2], v[:, -1]))
             orient_disparity = ((orient_disparity * 180 / math.pi + 180) % 360 - 180).abs()
             return {"pos_max": pos_disparity,
                     "pos_avg": pos_disparity,

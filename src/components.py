@@ -12,7 +12,7 @@ from torch.distributions import Beta
 
 
 class PoseTransformSampler(nn.Module):
-    def __init__(self, pos_var=0.5, orient_var=pi/18, pos_mode='XYZ', orient_mode='XYZ'):
+    def __init__(self, pos_var=0.5, orient_var=pi/15, pos_mode='XYZ', orient_mode='XYZ'):
         super(PoseTransformSampler, self).__init__()
         self.pos_var = pos_var
         self.pos_mode = pos_mode
