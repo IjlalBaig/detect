@@ -157,6 +157,7 @@ def transform_points(points, xfrm, orient_mode="sc_euler"):
     points_transformed = kornia.transform_points(xfrm_mat, points)
     return points_transformed.view(b, h, w, 3)
 
+
 def depth_2_point(depth, scaling_factor=1, focal_length=0.03):
     dev = depth.device
     b, c, h, w = depth.size()
@@ -173,7 +174,7 @@ def depth_2_point(depth, scaling_factor=1, focal_length=0.03):
 
 
 def point_2_pixel(point, scaling_factor, focal_length=0.05):
-    b, h, w, _  = point.shape
+    b, h, w, _ = point.shape
     sx = sz = 0.036
     f_x = w / sx * focal_length
     f_z = h / sz * focal_length
@@ -186,14 +187,56 @@ def point_2_pixel(point, scaling_factor, focal_length=0.05):
 
     u = x_pos * f_x / y_pos + c_x
     v = - z_pos * f_z / y_pos + c_z
-    u_norm = (u - c_x) / c_x
-    v_norm = (v - c_z) / c_z
-
-    return torch.cat([u_norm.unsqueeze(-1), v_norm.unsqueeze(-1)], dim=-1)
+    return torch.cat([u.unsqueeze(-1), v.unsqueeze(-1)], dim=-1)
 
 
-def warp_img_2_pixel(img, pixel):
-    return F.grid_sample(img, pixel)
+def warp_img_2_pixel(img, pixel, inverse=True):
+    if inverse:
+        return F.grid_sample(img, pixel)
+    else:
+        out = torch.zeros_like(img)
+        b, c, h, w = out.shape
+        pixel[..., -2] = pixel[..., -2].where((pixel[..., -2] > 0.) & (pixel[..., -2] < h), torch.tensor(256.))
+        pixel[..., -1] = pixel[..., -1].where((pixel[..., -1] > 0.) & (pixel[..., -1] < w), torch.tensor(256.))
+        pixel = pixel.long()
+
+        out = out.where((0 > pixel[..., -2]) & (pixel[..., -2] > h) &
+                        (0 > pixel[..., -1]) & (pixel[..., -1] > w),
+                        F.pad(img, [0, 1, 0, 1])[..., pixel[..., -1], pixel[..., -2]].squeeze(-3))
+        return out
+#
+# from torchvision import transforms
+# from PIL import Image
+# import torch
+# import src.geometry as geo
+# from src.detect import geo_xfrm
+# im = Image.open("D:/Thesis/Implementation/scene_new/renders/restrict_z_xy_2/image0001.png").convert("RGB")
+# depth = Image.open("D:/Thesis/Implementation/scene_new/renders/restrict_z_xy_2/depth0001.png").convert("L")
+# im = transforms.Compose([transforms.Resize([256, 256]),
+#                          transforms.ToTensor(),
+#                          transforms.Normalize([0, 0, 0.], [1, 1, 1.])])(im).unsqueeze(0)
+# depth = transforms.Compose([transforms.Resize([256, 256]),
+#                             transforms.ToTensor(),
+#                             transforms.Normalize([0.0], [1.0])])(depth).unsqueeze(0)
+# xfrm = torch.tensor([[0.5, 0, 0, 0, 1, 0, 1, 0, 1]])
+# pts = geo.depth_2_point(depth, scaling_factor=20, focal_length=0.03)
+# pts_xfrmd = geo.transform_points(pts, xfrm)
+# px_xfrmd = geo.point_2_pixel(pts_xfrmd, scaling_factor=20, focal_length=0.03)
+# out = torch.zeros_like(im)
+# b, c, h, w = im.shape
+# px_0 = px_xfrmd[..., 0].squeeze(-1).unsqueeze(0)
+# px_1 = px_xfrmd[..., 1].squeeze(-1).unsqueeze(0)
+#
+# pixel = px_xfrmd
+# pixel[..., -2] = pixel[..., -2].where((pixel[..., -2] > 0.) & (pixel[..., -2] < h), torch.tensor(256.))
+# pixel[..., -1] = pixel[..., -1].where((pixel[..., -1] > 0.) & (pixel[..., -1] < w), torch.tensor(256.))
+# pixel = pixel.long()
+#
+# out = out.where((0 > pixel[..., -2]) & (pixel[..., -2] > h) &
+#                (0 > pixel[..., -1]) & (pixel[..., -1] > w), F.pad(im, [0, 1, 0, 1])[..., pixel[..., -1], pixel[..., -2]].squeeze(-3))
+# transforms.ToPILImage()(out.squeeze(0)).show()
+
+#
 
 
 def quaternion_to_rotation_matrix(quaternion: torch.Tensor) -> torch.Tensor:

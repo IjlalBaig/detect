@@ -406,20 +406,30 @@ def create_trainer_engine(model_enc, optim_enc, model_cal, optim_cal, model_dec,
         x_ = x[:, :, border:-border, border:-border]
 
         p, error_axis = xfrm_sampler(v)
-        x_g = geo_xfrm(x, d, p)[:, :, border:-border, border:-border]
+        # x_g = geo_xfrm(x, d, p)[:, :, border:-border, border:-border]
 
         # Infer pose
         v_l = model_enc(x_)
-        v_lg = model_enc(x_g)
+
+
+        # v_lg = model_enc(x_g)
 
         c = model_cal(x)
-
         v_c = xfrm_pose(v_l, c)
-        v_cg = xfrm_pose(v_lg, c)
+        x_l = model_dec(v_c.clone().detach().requires_grad_(True))
 
-        loss_pert = pertloss(xfrm_pose(v_c, p), v_cg)
+
+        # v_cg = xfrm_pose(v_lg, c)
+        with torch.no_grad():
+            v_pose = xfrm_pose(v_c, p)
+            x_g = model_dec(v_pose.clone().detach().requires_grad_(False))
+            v_lg = model_enc(x_g.clone().detach().requires_grad_(False)[:, :, border:-border, border:-border])
+
+        loss_pert = pertloss(v_pose, xfrm_pose(v_lg, c))
         # loss_pert = 0
         loss_enc = F.mse_loss(v_l, v) + 0.0 * loss_pert
+
+        loss_dec = F.mse_loss(x_l, x)
         # ###
 
         # optim_cal.zero_grad()
@@ -448,16 +458,20 @@ def create_trainer_engine(model_enc, optim_enc, model_cal, optim_cal, model_dec,
         #     loss_pert = pertloss(xfrm_pose(v_c, p), v_cg)
         #
 
-        # optim_cal.zero_grad()
-        # loss_pert.backward(retain_graph=True)
-        # optim_cal.step()
-        #
-        # optim_enc.zero_grad()
-        # loss_enc.backward()
-        # optim_enc.step()
+        optim_dec.zero_grad()
+        loss_dec.backward()
+        optim_dec.step()
+
+        optim_cal.zero_grad()
+        loss_pert.backward(retain_graph=True)
+        optim_cal.step()
+
+        optim_enc.zero_grad()
+        loss_enc.backward()
+        optim_enc.step()
 
         return {"loss_enc": loss_enc, "loss_dec": loss_pert,
-                "loss_recon": F.mse_loss(x, x)}
+                "loss_recon": loss_dec}
 
     engine = Engine(_update)
     # Add metrics
