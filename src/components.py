@@ -22,33 +22,36 @@ class PoseTransformSampler(nn.Module):
 
     def sample_xfrm(self, v):
         xfrm = torch.zeros_like(v)
-        dev = v.device
         xfrm[:, 4] = xfrm[:, 6] = xfrm[:, 8] = 1.
-        error_axis = random.sample("Y", 1)[0]
-        if error_axis is "Z":
-            if "Y" in self.pos_mode:
-                xfrm[..., 1] = self.pos_var * (self.sampler.sample() - 0.5) + xfrm[..., 1]
+        sample_space = ""
+        if self.pos_mode:
+            sample_space += "T"
+        if self.orient_mode:
+            sample_space += "R"
+
+        mode = random.sample(sample_space, 1)[0]
+        if mode is "R":
             if "X" in self.orient_mode:
                 x_euler = self.orient_var * (self.sampler.sample() - 0.5)
                 xfrm[..., 3] = torch.sin(x_euler)
                 xfrm[..., 4] = torch.cos(x_euler)
-
-        elif error_axis is "Y":
-            if "X" in self.pos_mode:
-               xfrm[..., 0] = self.pos_var * (self.sampler.sample() - 0.5) + xfrm[..., 0]
             if "Z" in self.orient_mode:
-                z_euler = self.orient_var * (self.sampler.sample() - 0.5)
+                z_euler = torch.tensor(self.orient_var * random.sample([-1., 1.], 1)[0], device=xfrm.device)
                 xfrm[..., 7] = torch.sin(z_euler)
                 xfrm[..., 8] = torch.cos(z_euler)
-
-        else:
-            if "Z" in self.pos_mode:
-                xfrm[..., 2] = self.pos_var * (self.sampler.sample() - 0.5) + xfrm[..., 2]
             if "Y" in self.orient_mode:
-                y_euler = self.orient_var * (self.sampler.sample() - 0.5)
+                y_euler = self.orient_var * random.sample([-1., 1.], 1)[0]# (self.sampler.sample() - 0.5)
                 xfrm[..., 5] = torch.sin(y_euler)
                 xfrm[..., 6] = torch.cos(y_euler)
-        return xfrm, error_axis
+        else:
+            if "X" in self.pos_mode:
+               xfrm[..., 0] = torch.tensor(self.pos_var * random.sample([-1., 1.], 1)[0], device=xfrm.device)
+            if "Y" in self.pos_mode:
+                xfrm[..., 1] = self.pos_var * (self.sampler.sample() - 0.5) + xfrm[..., 1]
+            if "Z" in self.pos_mode:
+                xfrm[..., 2] = self.pos_var * (self.sampler.sample() - 0.5) + xfrm[..., 2]
+
+        return xfrm, mode
 
     def forward(self, v):
         return self.sample_xfrm(v)

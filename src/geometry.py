@@ -158,7 +158,7 @@ def transform_points(points, xfrm, orient_mode="sc_euler"):
     return points_transformed.view(b, h, w, 3)
 
 
-def depth_2_point(depth, scaling_factor=1, focal_length=0.03):
+def create_point_cloud(depth, scaling_factor=1, focal_length=0.03):
     dev = depth.device
     b, c, h, w = depth.size()
     sx = sz = 0.036
@@ -172,9 +172,28 @@ def depth_2_point(depth, scaling_factor=1, focal_length=0.03):
 
     return torch.cat([x_pos, y_pos, z_pos], dim=1).permute(0, 2, 3, 1).view(b, h, w, 3)
 
+def create_point_cloud_old(depth, img, scaling_factor=1, focal_length=0.03):
+    dev = depth.device
+    B, C, H, W = depth.size()
+    sx = sz = 0.036
+    f_x = W / sx * focal_length
+    f_z = H / sz * focal_length
+    c_x = (W - 1) / 2.0
+    c_z = (H - 1) / 2.0
+    y_pos = (1 - depth) * scaling_factor
+    z_pos = - torch.arange(-c_z, c_z + 1, device=dev).view(-1, 1).repeat(B, C, 1, W) * y_pos / f_z
+    x_pos = torch.arange(-c_x, c_x + 1, device=dev).repeat(B, C, H, 1) * y_pos / f_x
+    point = torch.cat([x_pos, y_pos, z_pos], dim=1).permute(0, 2, 3, 1)
+    # point = geo.transform_points(point, torch.tensor([[0.5, 0, 0, 0, 1, 0, 1, 0, 1]]))
+    # r = img[:, 0, ...].unsqueeze(0)
+    # g = img[:, 1, ...].unsqueeze(0)
+    # b = img[:, 2, ...].unsqueeze(0)
+
+    return torch.cat([x_pos, y_pos, z_pos], dim=1).permute(0, 2, 3, 1)
+
 
 def point_2_pixel(point, scaling_factor, focal_length=0.05):
-    b, h, w, _ = point.shape
+    b, h, w, _  = point.shape
     sx = sz = 0.036
     f_x = w / sx * focal_length
     f_z = h / sz * focal_length
@@ -187,24 +206,108 @@ def point_2_pixel(point, scaling_factor, focal_length=0.05):
 
     u = x_pos * f_x / y_pos + c_x
     v = - z_pos * f_z / y_pos + c_z
+    u_norm = (u - c_x) / c_x
+    v_norm = (v - c_z) / c_z
+
+    return torch.cat([u_norm.unsqueeze(-1), v_norm.unsqueeze(-1)], dim=-1)
+
+
+def point_2_pixel_old(point, scaling_factor, focal_length=0.05):
+    B, H, W, D = point.shape
+    sx = sz = 0.036
+    f_x = W / sx * focal_length
+    f_z = H / sz * focal_length
+    c_x = (W - 1) / 2.0
+    c_z = (H - 1) / 2.0
+
+    x_pos = point[..., 0]
+    y_pos = point[..., 1]
+    z_pos = point[..., 2]
+
+    u = x_pos * f_x / y_pos + c_x
+    v = - z_pos * f_z / y_pos + c_z
+    u_norm = (u - c_x) / c_x
+    v_norm = (v - c_z) / c_z
+    # pixel = torch.cat([u.unsqueeze(-1), v.unsqueeze(-1)], dim=-1)
+
+    # r = r.where((u >= 0) & (u < W) & (v >= 0) & (v < H), torch.zeros_like(r))
+    # g = g.where((u >= 0) & (u < W) & (v >= 0) & (v < H), torch.zeros_like(g))
+    # b = b.where((u >= 0) & (u < W)& (v >= 0) & (v < H), torch.zeros_like(b))
     return torch.cat([u.unsqueeze(-1), v.unsqueeze(-1)], dim=-1)
 
 
-def warp_img_2_pixel(img, pixel, inverse=True):
-    if inverse:
-        return F.grid_sample(img, pixel)
-    else:
-        out = torch.zeros_like(img)
-        b, c, h, w = out.shape
-        pixel[..., -2] = pixel[..., -2].where((pixel[..., -2] > 0.) & (pixel[..., -2] < h), torch.tensor(256.))
-        pixel[..., -1] = pixel[..., -1].where((pixel[..., -1] > 0.) & (pixel[..., -1] < w), torch.tensor(256.))
-        pixel = pixel.long()
+def warp_img_2_pixel(img, pixel):
+    return F.grid_sample(img, pixel)
 
-        out = out.where((0 > pixel[..., -2]) & (pixel[..., -2] > h) &
-                        (0 > pixel[..., -1]) & (pixel[..., -1] > w),
-                        F.pad(img, [0, 1, 0, 1])[..., pixel[..., -1], pixel[..., -2]].squeeze(-3))
-        return out
+
+def warp_img_2_pixel_old(img, pixel, inverse=True):
+    # if inverse:
+    return F.grid_sample(img, pixel)
+    # else:
+    #     B, C, H, W, = img.shape
+    #     out = torch.zeros_like(img)
+    #
+    #     u = pixel[..., 0]
+    #     v = pixel[..., 1]
+    #     r = img[:, 0, ...].unsqueeze(1)
+    #     g = img[:, 1, ...].unsqueeze(1)
+    #     b = img[:, 2, ...].unsqueeze(1)
+    #     out = out.where((u >= 0) & (u < W) & (v >= 0) & (v < H), torch.cat([r, g, b], dim=1))
+    #     transforms.ToPILImage()(out.squeeze(0)).show()
+        #
+        # out = torch.zeros_like(img)
+        # b, c, h, w = out.shape
+        # pixel[..., -2] = pixel[..., -2].where((pixel[..., -2] > 0.) & (pixel[..., -2] < h), torch.tensor(256.))
+        # pixel[..., -1] = pixel[..., -1].where((pixel[..., -1] > 0.) & (pixel[..., -1] < w), torch.tensor(256.))
+        # pixel = pixel.long()
+        #
+        # out = out.where((0 > pixel[..., -2]) & (pixel[..., -2] > h) &
+        #                 (0 > pixel[..., -1]) & (pixel[..., -1] > w),
+        #                 F.pad(img, [0, 1, 0, 1])[..., pixel[..., -1], pixel[..., -2]].squeeze(-3))
+        # return out
+
+
 #
+# dev = depth.device
+# B, C, H, W = depth.size()
+# sx = sz = 0.036
+# f_x = W / sx * focal_length
+# f_z = H / sz * focal_length
+# c_x = (W - 1) / 2.0
+# c_z = (H - 1) / 2.0
+# y_pos = (1 - depth) * scaling_factor
+# z_pos = - torch.arange(-c_z, c_z + 1, device=dev).view(-1, 1).repeat(B, C, 1, W) * y_pos / f_z
+# x_pos = torch.arange(-c_x, c_x + 1, device=dev).repeat(B, C, H, 1) * y_pos / f_x
+# point = torch.cat([x_pos, y_pos, z_pos], dim=1).permute(0, 2, 3, 1)
+# point = geo.transform_points(point, torch.tensor([[0.5, 0, 0, 0, 1, 0, 1, 0, 1]]))
+# B, H, W, D = point.shape
+# sx = sz = 0.036
+# f_x = W / sx * focal_length
+# f_z = H / sz * focal_length
+# c_x = (W - 1) / 2.0
+# c_z = (H - 1) / 2.0
+# x_pos = point[..., 0]
+# y_pos = point[..., 1]
+# z_pos = point[..., 2]
+# u = x_pos * f_x / y_pos + c_x
+# v = - z_pos * f_z / y_pos + c_z
+# w = y_pos / scaling_factor
+# pixel = torch.cat([u.unsqueeze(-1), v.unsqueeze(-1)], dim=-1)
+# pixel = pixel.long()
+# B, C, H, W, = img.shape
+# out = torch.zeros_like(img)
+# u = pixel[..., 0]
+# v = pixel[..., 1]
+
+
+# pixel[..., -2] = pixel[..., -2].where((pixel[..., -2] > 0.) & (pixel[..., -2] < H), torch.tensor(256.))
+# pixel[..., -1] = pixel[..., -1].where((pixel[..., -1] > 0.) & (pixel[..., -1] < W), torch.tensor(256.))
+# out = out.where((0 > pixel[..., -2]) & (pixel[..., -2] > H) &
+#                 (0 > pixel[..., -1]) & (pixel[..., -1] > W), F.pad(im, [0, 1, 0, 1])[..., pixel[..., -1], pixel[..., -2]].squeeze(-3))
+# out = out.where((u < 0) |(u >= W) | (v < 0) | (v >= H), torch.cat([r, g, b], dim=1))
+# transforms.ToPILImage()(out.squeeze(0)).show()
+#
+
 # from torchvision import transforms
 # from PIL import Image
 # import torch

@@ -10,12 +10,13 @@ import os
 from torch.utils.data import Subset, DataLoader
 from torchvision.utils import make_grid
 import torch.nn.functional as F
-from src.test import Tower, detectnet, Discriminator, Priori
+from src.test import Tower, detectnet
 from torch.distributions import Normal, Beta
 from torch.optim.lr_scheduler import StepLR
 from pytorch_msssim import SSIM, MS_SSIM
 from src.utils import Annealer
 
+from src.kornia import warp_frame_depth
 from tensorboardX import SummaryWriter
 
 # Ignite
@@ -46,21 +47,19 @@ torch.backends.cudnn.benchmark = False
 
 
 
-
-
-
 def test(batch_sizes, data_dir, log_dir, fractions, workers, use_gpu, standardize=False):
-
     device = "cuda" if torch.cuda.is_available() and use_gpu else "cpu"
 
     train_loader, _, test_loader = get_data_loaders(dpath=data_dir, fractions=fractions, im_mode="RGB",
                                                    batch_sizes=batch_sizes, num_workers=workers,
                                                    im_dims=(128, 128), standardize=standardize)
 
-    model_enc, model_dec, model_cal = detectnet(9, pos_mode="X", orient_mode="Z")
+    model_enc, model_dec, model_cal = detectnet(4, pos_mode="X", orient_mode="Z")
     model_enc.to(device)
     model_cal.to(device)
     model_dec.to(device)
+
+    pose_xfrm_sampler = PoseTransformSampler(pos_mode="X", orient_mode="Z")
 
     # init checkpoint handler
     model_name = model_enc.__class__.__name__ + model_dec.__class__.__name__
@@ -81,19 +80,25 @@ def test(batch_sizes, data_dir, log_dir, fractions, workers, use_gpu, standardiz
         with torch.no_grad():
             x, d, v, masks, intrinsics = _prepare_batch(batch, device=device, non_blocking=True)
 
-            v_pred = model_enc(x)
-            t_c = model_cal(x)
-            # vc_pred = xfrm_pose(v_pred, t_c)
-            # x_pred = model_dec(vc_pred)
+            p, error_axis = pose_xfrm_sampler(v)
+            x_g = geo_xfrm(x, d, p) #[:, :, border:-border, border:-border]
 
-            print("a: ", v)
-            print("b: ", v_pred)
-            print("tc", t_c)
+            # x_masked = mask_img_border(x.clone(), 25)
+            v_l = model_enc(x)
+            v_lg = model_enc(x_g)
+            x_l = model_dec(v_l)
+            x_lg = model_dec(v_lg)
+
             # send to cpu
-            # im = im.detach().cpu().float()
-            # im_pred = x_pred.detach().cpu().float()
-            # writer.add_image("ground truth", make_grid(im), i)
-            # writer.add_image("reconstruction", make_grid(im_pred), i)
+            x = x.detach().cpu().float()
+            x_g = x_g.detach().cpu().float()
+            x_l = x_l.detach().cpu().float()
+            x_lg = x_lg.detach().cpu().float()
+
+            writer.add_image("ground truth", make_grid(x), i)
+            writer.add_image("reconstruction", make_grid(x_l), i)
+            writer.add_image("geo transformed", make_grid(x_g), i)
+            writer.add_image("model transformed", make_grid(x_lg), i)
 
     # for i in range(360):
     #     with torch.no_grad():
@@ -125,7 +130,7 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu,
                                                    im_dims=(128, 128), standardize=standardize)
 
     # Create model and optimizer
-    model_enc, model_dec, model_cal = detectnet(9, pos_mode=pos_mode, orient_mode=orient_mode)
+    model_enc, model_dec, model_cal = detectnet(4, pos_mode="X", orient_mode="Z")
     optim_enc = torch.optim.Adam(model_enc.parameters(), lr=5e-3)
     optim_cal = torch.optim.Adam(model_cal.parameters(), lr=1e-3)
     optim_dec = torch.optim.Adam(model_dec.parameters(), lr=5e-3)
@@ -204,29 +209,30 @@ def train(n_epochs, batch_sizes, data_dir, log_dir, fractions, workers, use_gpu,
             b, c, h, w = x.size()
             border = 28
             x_ = x[:, :, border:-border, border:-border]
+            # x_ = x
             p, error_axis = pose_xfrm_sampler(v)
-            x_g = geo_xfrm(x, d, p)[:, :, border:-border, border:-border]
+            x_g = geo_xfrm(x, d, p) #[:, :, border:-border, border:-border]
 
             # x_masked = mask_img_border(x.clone(), 25)
-            v_l = model_enc(x_)
+            v_l = model_enc(x)
             v_lg = model_enc(x_g)
 
-            c = model_cal(x)
+            # c = model_cal(x)
 
-            v_c = xfrm_pose(v_l, c)
-            v_cg = xfrm_pose(v_lg, c)
+            # v_c = xfrm_pose(v_l, c)
+            # v_cg = xfrm_pose(v_lg, c)
 
             x_l = model_dec(v_l)
             x_lg = model_dec(v_lg)
 
-            writer.add_image("ground truth", make_grid(x_g.detach().cpu().float()), engine.state.epoch)
-            writer.add_image("reconstruction", make_grid(x_.detach().cpu().float()), engine.state.epoch)
-            writer.add_image("geo transformed", make_grid(geo_xfrm(x, d, p).detach().cpu().float()), engine.state.epoch)
+            writer.add_image("ground truth", make_grid(x.detach().cpu().float()), engine.state.epoch)
+            writer.add_image("reconstruction", make_grid(x_l.detach().cpu().float()), engine.state.epoch)
+            writer.add_image("geo transformed", make_grid(x_g.detach().cpu().float()), engine.state.epoch)
             writer.add_image("model transformed", make_grid(x_lg.detach().cpu().float()), engine.state.epoch)
 
-            writer.add_scalar("validation/{}".format("tx"), c[0, 0], engine.state.epoch)
-            writer.add_scalar("validation/{}".format("ty"), c[0, 1], engine.state.epoch)
-            writer.add_scalar("validation/{}".format("tpsi"), math.atan2(c[0, -2], c[0, -1])*180/math.pi, engine.state.epoch)
+            # writer.add_scalar("validation/{}".format("tx"), c[0, 0], engine.state.epoch)
+            # writer.add_scalar("validation/{}".format("ty"), c[0, 1], engine.state.epoch)
+            # writer.add_scalar("validation/{}".format("tpsi"), math.atan2(c[0, -2], c[0, -1])*180/math.pi, engine.state.epoch)
 
     @trainer_engine.on(Events.EPOCH_COMPLETED)
     def log_validation_metrics(engine):
@@ -295,7 +301,7 @@ def _prepare_batch(batch, device=None, non_blocking=False):
             convert_tensor(intrinsics, device=device, non_blocking=non_blocking))
 
 def geo_xfrm(x, depth, xfrm):
-    pts = geo.depth_2_point(depth, scaling_factor=20, focal_length=0.03)
+    pts = geo.create_point_cloud(depth, scaling_factor=20, focal_length=0.03)
     pts_xfrmd = geo.transform_points(pts, xfrm)
     px_xfrmd = geo.point_2_pixel(pts_xfrmd, scaling_factor=20, focal_length=0.03)
     return geo.warp_img_2_pixel(x, px_xfrmd)
@@ -349,23 +355,14 @@ def pertloss(v_pose, v_geo):
     #        torch.atan2(pose_offset[:, 5], pose_offset[:, 6]).abs().sum() + \
     #        torch.atan2(pose_offset[:, 7], pose_offset[:, 8]).abs().sum()
 
-    loss = F.mse_loss(v_geo[:, :3], v_pose[:, :3], reduction="sum")
+    loss = F.mse_loss(v_geo[:, :], v_pose[:, :], reduction="sum")
     return loss
 
-
-def mask_img_border(x, pixel_var):
-    border = random.randint(0, 3)
-    border_size = int(random.uniform(0, 1) * pixel_var)
-    if border == 0:
-        x[..., :border_size] = 0.0
-    elif border == 1:
-        x[..., :border_size, :] = 0.0
-    elif border == 2:
-        x[..., -border_size:] = 0.0
-    elif border == 3:
-        x[..., -border_size:, :] = 0.0
-    return x
-
+def stdize(v):
+    mu = torch.tensor([1.6442e-03, -3.0740e-03,  1.5000e+00,  0.0000e+00,  1.0000e+00,
+                                           0.0000e+00,  1.0000e+00,  1.0021e-04, -4.3859e-02], device=v.device)
+    std = torch.tensor([0.1551, 0.1554, 1.0000, 1.0000, 1.0000, 1.0000, 1.0000, 0.7269, 0.6853], device=v.device)
+    return (v - mu) / std
 
 def create_trainer_engine(model_enc, optim_enc, model_cal, optim_cal, model_dec, optim_dec, xfrm_sampler, mixup_sampler,
                           device=None, non_blocking=False, noise_factor=0.0):
@@ -381,95 +378,67 @@ def create_trainer_engine(model_enc, optim_enc, model_cal, optim_cal, model_dec,
 
         x, d, v, masks, intrinsics = _prepare_batch(batch, device=device,
                                                     non_blocking=non_blocking)
-
-        ###
-        #### todo: calibration test
-        # c = torch.tensor([0.321, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.3255, 0.9455], device=x.device)
-        # p, error_axis = xfrm_sampler(v)
-        # v_c = xfrm_pose(v, c)
-        # # v_c_p = xfrm_pose(v_c, p)
-        # # projective transformation
-        # t_c = model_cal(x)
-        # v_c_pred = xfrm_pose(v, t_c)
-        # noise = torch.rand_like(v_c_pred) * noise_factor / 0.5
-        # noise[2:-2] = 0.0
-        # v_c_pred = v_c_pred + noise
-        # e = rel_pose_xfrm(v_c, v_c_pred)
-        #
-        # v_g = xfrm_pose(xfrm_pose(v_c, p) + noise, e)
-        # v_p = xfrm_pose(v_c_pred, p)
-        #
-        # loss_pert = pertloss(v_p, v_g)
-        # v_c_pred_p = xfrm_pose(v_c_pred, p)
-        # ####
+        lambda_ = mixup_sampler.sample()
+        mixup_shift = random.randint(1, x.size(0))
         border = 28
-        x_ = x[:, :, border:-border, border:-border]
+        # x_ = x[:, :, border:-border, border:-border]
+        x_ = x
+        # Sample perturbation
+        # p, sample_mode = xfrm_sampler(v)
+        # if sample_mode is "R":
+        #     for param_pos in model_cal.pos.parameters():
+        #         param_pos.requires_grad = False
+        #     for param_orient in model_cal.orient.parameters():
+        #         param_orient.requires_grad = True
+        # else:
+        #     for param_orient in model_cal.orient.parameters():
+        #         param_orient.requires_grad = False
+        #     for param_pos in model_cal.pos.parameters():
+        #         param_pos.requires_grad = True
 
-        p, error_axis = xfrm_sampler(v)
         # x_g = geo_xfrm(x, d, p)[:, :, border:-border, border:-border]
 
         # Infer pose
+        ###### remove after testing
         v_l = model_enc(x_)
-
-
-        # v_lg = model_enc(x_g)
-
-        c = model_cal(x)
-        v_c = xfrm_pose(v_l, c)
-        x_l = model_dec(v_c.clone().detach().requires_grad_(True))
-
-
-        # v_cg = xfrm_pose(v_lg, c)
-        with torch.no_grad():
-            v_pose = xfrm_pose(v_c, p)
-            x_g = model_dec(v_pose.clone().detach().requires_grad_(False))
-            v_lg = model_enc(x_g.clone().detach().requires_grad_(False)[:, :, border:-border, border:-border])
-
-        loss_pert = pertloss(v_pose, xfrm_pose(v_lg, c))
-        # loss_pert = 0
-        loss_enc = F.mse_loss(v_l, v) + 0.0 * loss_pert
+        x_l = model_dec(v_l)
 
         loss_dec = F.mse_loss(x_l, x)
-        # ###
-
-        # optim_cal.zero_grad()
-        # loss_pert.backward(retain_graph=True)
-        # optim_cal.step()
-
-        # with torch.no_grad():
-        #     loss_pert = 0
-        #     loss_enc = 0
-        #     # c = torch.tensor([0.321, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.3255, 0.9455], device=x.device)
-        #     c = torch.tensor([0.65, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.8386, 0.5446], device=x.device)
-        #     border = 28
-        #     x_ = x[:, :, border:-border, border:-border]
-        #
-        #     p, error_axis = xfrm_sampler(v)
-        #     x_g = geo_xfrm(x, d, p)[:, :, border:-border, border:-border]
-        #
-        #     # Infer pose
-        #     model_enc.eval()
-        #     v_l = model_enc(x_)
-        #     v_lg = model_enc(x_g)
-        #
-        #     v_c = xfrm_pose(v_l, c)
-        #     v_cg = xfrm_pose(v_lg, c)
-        #
-        #     loss_pert = pertloss(xfrm_pose(v_c, p), v_cg)
-        #
-
+        loss_enc = loss_dec
         optim_dec.zero_grad()
-        loss_dec.backward()
+        loss_dec.backward(retain_graph=True)
         optim_dec.step()
-
-        optim_cal.zero_grad()
-        loss_pert.backward(retain_graph=True)
-        optim_cal.step()
 
         optim_enc.zero_grad()
         loss_enc.backward()
         optim_enc.step()
 
+        ###########################
+
+        # v_l, v_l_mix = model_enc(x_, mixup_shift, lambda_)
+        # v_lg = model_enc(x_g)
+
+        # Calibrate pose
+        # c = model_cal(x)
+        # v_c = xfrm_pose(v_l, c)
+        # v_cg = xfrm_pose(v_lg, c)
+
+        # Compute loss
+        # loss_pert = pertloss(stdize(xfrm_pose(v_c, p)), stdize(v_cg))
+
+        # loss_mixup = F.mse_loss(v_l_mix, model_enc.mix(v_l, v_l.roll(mixup_shift, dims=0), lambda_))
+        loss_mixup = 0
+        loss_pert = 0
+        loss_enc = 0
+        # loss_enc = F.mse_loss(v_l, v) + loss_mixup + 0 * loss_pert
+
+        # optim_cal.zero_grad()
+        # loss_pert.backward(retain_graph=True)
+        # optim_cal.step()
+
+        # optim_enc.zero_grad()
+        # loss_enc.backward()
+        # optim_enc.step()
         return {"loss_enc": loss_enc, "loss_dec": loss_pert,
                 "loss_recon": loss_dec}
 
@@ -507,8 +476,9 @@ def create_evaluator_engine(model_enc, model_cal, model_dec, device=None, non_bl
         model_cal.eval()
         with torch.no_grad():
             x, d, v, masks, intr = _prepare_batch(batch, device=device, non_blocking=non_blocking)
-            border = 28
-            x_ = x[:, :, border:-border, border:-border]
+            # border = 28
+            # x_ = x[:, :, border:-border, border:-border]
+            x_ = x
 
             v_l = model_enc(x_)
 

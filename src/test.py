@@ -213,15 +213,18 @@ class Conv2dLSTMCell(nn.Module):
 
         return cell, hidden
 
+
 class DetectNetCalib(nn.Module):
     def __init__(self, pos_mode="XYZ", orient_mode="XYZ"):
         super(DetectNetCalib, self).__init__()
         self.pos_mode = pos_mode
         self.orient_mode = orient_mode
-        self.calib = nn.Linear(1, 6)
+        self.pos = nn.Linear(1, 3)
+        self.orient = nn.Linear(1, 3)
 
     def forward(self, x):
-        t, r = torch.split(self.calib(torch.ones(x.size(0), 1, device=x.device)), [3, 3], dim=1)
+        t = self.pos(torch.ones(x.size(0), 1, device=x.device))
+        r = self.orient(torch.ones(x.size(0), 1, device=x.device))
         s_x = torch.sin(r[:, 0]).unsqueeze(-1)
         c_x = torch.cos(r[:, 0]).unsqueeze(-1)
         s_y = torch.sin(r[:, 1]).unsqueeze(-1)
@@ -229,8 +232,9 @@ class DetectNetCalib(nn.Module):
         s_z = torch.sin(r[:, 2]).unsqueeze(-1)
         c_z = torch.cos(r[:, 2]).unsqueeze(-1)
         k = torch.cat([t, s_x, c_x, s_y, c_y, s_z, c_z], dim=1)
+        # standardize
         if "X" not in self.pos_mode:
-            k[:, 0] = 0.0
+            k[:, 0] = 0.65
         if "Y" not in self.pos_mode:
             k[:, 1] = 0.0
         if "Z" not in self.pos_mode:
@@ -242,8 +246,8 @@ class DetectNetCalib(nn.Module):
             k[:, 5] = 0.0
             k[:, 6] = 1.0
         if "Z" not in self.orient_mode:
-            k[:, 7] = 0.0
-            k[:, 8] = 1.0
+            k[:, 7] = 0.8386
+            k[:, 8] = 0.5446
         return k
 
 
@@ -275,11 +279,13 @@ class DetectNetEncoder(nn.Module):
         self.conv2 = nn.Conv2d(self.inplanes, self.inplanes, kernel_size=3, stride=2, padding=1, bias=False)
         self.layer1 = self._make_layer(block, 64, layers[0])
         self.layer2 = self._make_layer(block, 128, layers[1], stride=2, dilate=replace_stride_with_dilation[0])
+        # Mix 1
         self.layer3 = self._make_layer(block, 256, layers[2], stride=2, dilate=replace_stride_with_dilation[1])
         self.layer4 = self._make_layer(block, 512, layers[3], stride=2, dilate=replace_stride_with_dilation[2])
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        # Mix 2
         self.fc = nn.Linear(512 * block.expansion, v_dim)
-        self.drop1d = nn.Dropout(0.8)
+
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -327,74 +333,50 @@ class DetectNetEncoder(nn.Module):
     def mix(self, a, b, lambda_):
         return lambda_*a + (1-lambda_)*b
 
-    def normalize_pose(self, v):
-        p, o = v.split([3, 6], dim=-1)
-        o_x = torch.atan2(o[:, 0], o[:, 1])
-        o_y = torch.atan2(o[:, 2], o[:, 3])
-        o_z = torch.atan2(o[:, 4], o[:, 5])
-        s_x = torch.sin(o_x).unsqueeze(-1)
-        c_x = torch.cos(o_x).unsqueeze(-1)
-        s_y = torch.sin(o_y).unsqueeze(-1)
-        c_y = torch.cos(o_y).unsqueeze(-1)
-        s_z = torch.sin(o_z).unsqueeze(-1)
-        c_z = torch.cos(o_z).unsqueeze(-1)
-        v = torch.cat([p, s_x, c_x, s_y, c_y, s_z, c_z], dim=1)
-        # x[:, 0] = 0.
-        # x[:, 1] = 0.
-        v[:, 2] = 1.5
+    # use only for pose predictions
+    def format_pose(self, v):
+        p, o = v.split([2, 2], dim=-1)
+        p_x = p[:, 0].unsqueeze(-1)
+        p_y = p[:, 1].unsqueeze(-1)
+        p_z = torch.zeros_like(p_x)
 
-        v[:, 3] = 0.
-        v[:, 4] = 1.
-        v[:, 5] = 0.
-        v[:, 6] = 1.
+        o_z = torch.atan2(o[:, 0], o[:, 1])
+
+        s_z = torch.sin(o_z).unsqueeze(-1)
+        s_x = torch.zeros_like(s_z)
+        s_y = torch.zeros_like(s_z)
+
+        c_z = torch.cos(o_z).unsqueeze(-1)
+        c_x = torch.ones_like(c_z)
+        c_y = torch.ones_like(c_z)
+        v = torch.cat([p_x, p_y, p_z, s_x, c_x, s_y, c_y, s_z, c_z], dim=1)
         return v
 
-    # def predict_calib(self, x):
-    #     t, r = torch.split(self.calib(torch.ones(x.size(0), 1, device=x.device)), [3, 3], dim=1)
-    #     s_x = torch.sin(r[:, 0]).unsqueeze(-1)
-    #     c_x = torch.cos(r[:, 0]).unsqueeze(-1)
-    #     s_y = torch.sin(r[:, 1]).unsqueeze(-1)
-    #     c_y = torch.cos(r[:, 1]).unsqueeze(-1)
-    #     s_z = torch.sin(r[:, 2]).unsqueeze(-1)
-    #     c_z = torch.cos(r[:, 2]).unsqueeze(-1)
-    #     k = torch.cat([t, s_x, c_x, s_y, c_y, s_z, c_z], dim=1)
-    #     k[:, 1] = k[:, 2] = 0
-    #     k[:, 3] = 0.
-    #     k[:, 4] = 1.
-    #     k[:, 5] = 0.
-    #     k[:, 6] = 1.
-    #     return k
-
     def forward(self, x, shift=None, lambda_=None):
-        input = x
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
-        # todo: remove later
-        # x = self.conv2(x)
-        # x = self.relu(x)
-        # end
         x = self.maxpool(x)
         x = F.relu(self.layer1(x))
-        x = F.relu(self.layer2(x))
-        x_ = F.relu(self.layer3(x))
-        x = self.layer4(x_)
+        x_1 = F.relu(self.layer2(x))
+        x = F.relu(self.layer3(x_1))
+        x = self.layer4(x)
         x = self.avgpool(x)
         x = x.reshape(x.size(0), -1)
         x = self.fc(x)
-        x = self.normalize_pose(x)
-        # k = self.predict_calib(x)
+        # x = self.format_pose(x)
 
         if shift is None or lambda_ is None:
             return x
         else:
-            x_mix = self.mix(x_, x_.roll(shift, dims=0), lambda_)
-            x_mix = self.layer4(x_mix)
-            x_mix = self.avgpool(x_mix)
-            x_mix = x_mix.reshape(x_mix.size(0), -1)
-            x_mix = self.fc(x_mix)
-            x_mix = self.normalize_pose(x_mix)
-            return x, x_mix
+            x_mix1 = self.mix(x_1, x_1.roll(shift, dims=0), lambda_)
+            x_mix1 = F.relu(self.layer3(x_mix1))
+            x_mix1 = self.layer4(x_mix1)
+            x_mix1 = self.avgpool(x_mix1)
+            x_mix1 = x_mix1.reshape(x_mix1.size(0), -1)
+            x_mix1 = self.fc(x_mix1)
+            # x_mix1 = self.format_pose(x_mix1)
+            return x, x_mix1
 
 
 class DetectNetDecoder(nn.Module):
@@ -403,7 +385,7 @@ class DetectNetDecoder(nn.Module):
         self.inplanes = 64
         # Decoder Section
         self.fc = nn.Sequential(
-            nn.Linear(v_dim, 4096) #todo 1024
+            nn.Linear(v_dim, 4096)
         )
         self.trans_layer1 = self._make_transpose(trans_block, 512, trans_layers[0], stride=2)
         self.trans_layer2 = self._make_transpose(trans_block, 256, trans_layers[1], stride=2)
@@ -454,8 +436,14 @@ class DetectNetDecoder(nn.Module):
     def mix(self, a, b, lambda_):
         return lambda_*a + (1-lambda_)*b
 
+    def unformat_pose(self, v):
+        x = torch.cat([v[:, 0].unsqueeze(-1), v[:, 1].unsqueeze(-1), v[:, -2:]], dim=1)
+        return x
+
     def forward(self, v, shift=None, lambda_=None):
-        x = self.fc(v)
+        # x = self.unformat_pose(v)
+        x = v
+        x = self.fc(x)
         x = x.view(-1, 64, 8, 8) # todo 4,4
         x = self.trans_layer1(x)
         x = F.relu(self.trans_layer2(x))
@@ -471,64 +459,7 @@ class DetectNetDecoder(nn.Module):
             return x, x_mix
 
 
-class Discriminator(nn.Module):
-    def __init__(self, v_dim=2):
-        super(Discriminator, self).__init__()
-        self.v_dim = v_dim
-        self.convs = nn.Sequential(
-            nn.Conv2d(1, 32, kernel_size=5, stride=1, padding=2),
-            nn.ReLU(),
-            nn.Conv2d(32, 256, kernel_size=5, stride=2, padding=2),
-            # nn.BatchNorm2d(128),
-            nn.ReLU(),
-            nn.Conv2d(256, 256, kernel_size=5, stride=2, padding=2),
-            # nn.BatchNorm2d(256),
-            nn.ReLU(),
-            nn.Conv2d(256, 256, kernel_size=5, stride=2, padding=2),
-            # nn.BatchNorm2d(256),
-            nn.ReLU(),
-            nn.Conv2d(256, 256, kernel_size=5, stride=2, padding=2),
-        )
-        self.flatten = Flatten()
-        self.fc_merge = nn.Sequential(
-            nn.Linear(4096 + self.v_dim, 1024),
-            nn.ReLU()
-        )
-        self.fc = nn.Sequential(
-            nn.Linear(1024, 512),
-            # nn.BatchNorm1d(512, momentum=0.9),
-            nn.ReLU(),
-            nn.Linear(512, 1),
-            nn.Sigmoid()
-        )
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight)
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.Linear):
-                nn.init.xavier_normal_(m.weight, nn.init.calculate_gain('sigmoid'))
 
-    def forward(self, x, v):
-        x = self.convs(x)
-        x_merge = self.flatten(x)
-        x_merge = self.fc_merge(torch.cat([x_merge, v], dim=1))
-        return x, self.fc(x_merge)
-
-
-class Priori(nn.Module):
-    def __init__(self):
-        super(Priori, self).__init__()
-        self.fc = nn.Linear(1, 16384)
-        self.conv = nn.Conv2d(16, 64, kernel_size=3, stride=1, padding=1)
-
-    def forward(self):
-        ones = torch.ones(1, device="cuda")
-        x = self.fc(ones)
-        x = x.view(1, 16, 32, 32)
-        x = self.conv(x)
-        return x
 
 
 def detectnet(v_dim=9, pos_mode="XYZ", orient_mode="XYZ"):

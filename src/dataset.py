@@ -26,9 +26,9 @@ class EnvironmentDataset(Dataset):
         self._im_std = 1.   # 0.1101
         self.standardize_pose = standardize
         if self.standardize_pose:
-            self.pose_mean = torch.tensor([1.3863e-03,  7.7718e-04,  1.4995e+00, -2.8261e-03,  1.2018e-03,
-                                           -1.2280e-02,  6.8632e-01, -6.3317e-04,  1.3916e-01])
-            self.pose_std = torch.tensor([0.2632, 0.2655, 0.0520, 0.6667, 0.7453, 0.6562, 0.3135, 0.2450, 0.9595])
+            self.pose_mean = torch.tensor([1.6442e-03, -3.0740e-03,  1.5000e+00,  0.0000e+00,  1.0000e+00,
+                                           0.0000e+00,  1.0000e+00,  1.0021e-04, -4.3859e-02])
+            self.pose_std = torch.tensor([0.1551, 0.1554, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.7269, 0.6853])
             self.pose_std[:3] *= 10
             # self._compute_standardization()
 
@@ -56,9 +56,9 @@ class EnvironmentDataset(Dataset):
             position = sample.get("cam_position", [])
             orient_quat = sample.get("cam_quaternion", [1., 0., 0., 0.])
             orient_euler = t3d.euler.quat2euler(orient_quat, axes="sxyz")
-
-            # todo: transform to cam frame for relative pose loss
-            if -pi/18 < orient_euler[2] < pi/18:
+            if not (-pi / 36 < orient_euler[2] < pi / 36 or
+                    (-31 * pi / 36) > orient_euler[2] < -11 * pi / 12 or
+                    -13 * pi / 18 > orient_euler[2] > -14 * pi / 18):
             # if abs(orient_euler[0]) > 0.01:
                 # print(orient_euler[0] * 180. / pi)
                 data_frame = None
