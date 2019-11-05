@@ -473,9 +473,9 @@ def create_evaluator_engine(model_enc, model_cal, model_dec, device=None, non_bl
         model_cal.eval()
         with torch.no_grad():
             x, d, v, masks, intr = _prepare_batch(batch, device=device, non_blocking=non_blocking)
-            # border = 28
-            # x_ = x[:, :, border:-border, border:-border]
-            x_ = x
+            border = 28
+            x_ = x[:, :, border:-border, border:-border]
+            # x_ = x
 
             v_l = model_enc(x_)
 
