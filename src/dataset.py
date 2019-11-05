@@ -56,7 +56,7 @@ class EnvironmentDataset(Dataset):
             position = sample.get("cam_position", [])
             orient_quat = sample.get("cam_quaternion", [1., 0., 0., 0.])
             orient_euler = t3d.euler.quat2euler(orient_quat, axes="sxyz")
-            if not (-pi / 36 < orient_euler[2] < pi / 36 or
+            if (-pi / 36 < orient_euler[2] < pi / 36 or
                     (-31 * pi / 36) > orient_euler[2] < -11 * pi / 12 or
                     -13 * pi / 18 > orient_euler[2] > -14 * pi / 18):
             # if abs(orient_euler[0]) > 0.01:

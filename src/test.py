@@ -364,7 +364,7 @@ class DetectNetEncoder(nn.Module):
         x = self.avgpool(x)
         x = x.reshape(x.size(0), -1)
         x = self.fc(x)
-        # x = self.format_pose(x)
+        x = self.format_pose(x)
 
         if shift is None or lambda_ is None:
             return x
@@ -375,7 +375,7 @@ class DetectNetEncoder(nn.Module):
             x_mix1 = self.avgpool(x_mix1)
             x_mix1 = x_mix1.reshape(x_mix1.size(0), -1)
             x_mix1 = self.fc(x_mix1)
-            # x_mix1 = self.format_pose(x_mix1)
+            x_mix1 = self.format_pose(x_mix1)
             return x, x_mix1
 
 
@@ -441,8 +441,7 @@ class DetectNetDecoder(nn.Module):
         return x
 
     def forward(self, v, shift=None, lambda_=None):
-        # x = self.unformat_pose(v)
-        x = v
+        x = self.unformat_pose(v)
         x = self.fc(x)
         x = x.view(-1, 64, 8, 8) # todo 4,4
         x = self.trans_layer1(x)
