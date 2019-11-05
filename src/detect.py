@@ -381,8 +381,8 @@ def create_trainer_engine(model_enc, optim_enc, model_cal, optim_cal, model_dec,
         lambda_ = mixup_sampler.sample()
         mixup_shift = random.randint(1, x.size(0))
         border = 28
-        # x_ = x[:, :, border:-border, border:-border]
-        x_ = x
+        x_ = x[:, :, border:-border, border:-border]
+        # x_ = x
         # Sample perturbation
         # p, sample_mode = xfrm_sampler(v)
         # if sample_mode is "R":
@@ -403,15 +403,15 @@ def create_trainer_engine(model_enc, optim_enc, model_cal, optim_cal, model_dec,
         v_l, v_l_mix = model_enc(x_, mixup_shift, lambda_)
 
         loss_enc = F.mse_loss(v_l, v)
-        loss_mixup = F.mse_loss(v_l_mix, model_enc.mix(v, v.roll(mixup_shift, dims=0), lambda_))
+        # loss_mixup = F.mse_loss(v_l_mix, model_enc.mix(v, v.roll(mixup_shift, dims=0), lambda_))
 
-        loss = loss_enc + loss_mixup
+        loss = loss_enc
 
         optim_enc.zero_grad()
         loss.backward()
         optim_enc.step()
         loss_pert = 0.0
-        # loss_mixup = 0.0
+        loss_mixup = 0.0
 
         ###########################
 
