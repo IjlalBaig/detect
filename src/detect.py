@@ -400,21 +400,15 @@ def create_trainer_engine(model_enc, optim_enc, model_cal, optim_cal, model_dec,
 
         # Infer pose
         ###### remove after testing
-        v_l = model_enc(x_)
-        print(v_l)
-        print(v)
-        x_l = model_dec(v_l)
+        v_l, v_l_mix = model_enc(x_, mixup_shift, lambda_)
 
-        loss_dec = F.mse_loss(x_l, x)
-        loss_enc = F.mse_loss(v_l, v) + 0 * loss_dec
-
-        optim_dec.zero_grad()
-        loss_dec.backward(retain_graph=True)
-        optim_dec.step()
+        loss_enc = F.mse_loss(v_l, v)
+        loss_mixup = F.mse_loss(v_l_mix, model_enc.mix(v_l, v_l.roll(mixup_shift, dims=0), lambda_))
 
         optim_enc.zero_grad()
-        loss_enc.backward()
+        (loss_enc + loss_mixup).backward()
         optim_enc.step()
+        loss_pert = 0.0
 
         ###########################
 
@@ -430,9 +424,6 @@ def create_trainer_engine(model_enc, optim_enc, model_cal, optim_cal, model_dec,
         # loss_pert = pertloss(stdize(xfrm_pose(v_c, p)), stdize(v_cg))
 
         # loss_mixup = F.mse_loss(v_l_mix, model_enc.mix(v_l, v_l.roll(mixup_shift, dims=0), lambda_))
-        loss_mixup = 0
-        loss_pert = 0
-        loss_enc = 0
         # loss_enc = F.mse_loss(v_l, v) + loss_mixup + 0 * loss_pert
 
         # optim_cal.zero_grad()
@@ -443,7 +434,7 @@ def create_trainer_engine(model_enc, optim_enc, model_cal, optim_cal, model_dec,
         # loss_enc.backward()
         # optim_enc.step()
         return {"loss_enc": loss_enc, "loss_dec": loss_pert,
-                "loss_recon": loss_dec}
+                "loss_recon": loss_mixup}
 
     engine = Engine(_update)
     # Add metrics
