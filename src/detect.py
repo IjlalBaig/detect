@@ -403,7 +403,7 @@ def create_trainer_engine(model_enc, optim_enc, model_cal, optim_cal, model_dec,
         v_l, v_l_mix = model_enc(x_, mixup_shift, lambda_)
 
         loss_enc = F.mse_loss(v_l, v)
-        loss_mixup = F.mse_loss(v_l_mix, model_enc.mix(v_l, v_l.roll(mixup_shift, dims=0), lambda_))
+        loss_mixup = F.mse_loss(v_l_mix, model_enc.mix(v, v.roll(mixup_shift, dims=0), lambda_))
 
         optim_enc.zero_grad()
         (loss_enc + loss_mixup).backward()
