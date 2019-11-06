@@ -7,7 +7,7 @@ import src.detect as detect
 if __name__ == "__main__":
     parser = ArgumentParser(description='Deep End-to-End Calibration')
     parser.add_argument("--mode", type=str, default="train", help="operation to perform on model")
-    parser.add_argument("--n_epochs", type=int, default=2000, help="number of epochs run (default: 200)")
+    parser.add_argument("--n_epochs", type=int, default=200, help="number of epochs run (default: 200)")
     parser.add_argument("--batch_sizes", type=tuple, default=(12, 12, 12),
                         help="batch size for (training, validation, test)")
     parser.add_argument("--data_dir", type=str, help="location of data", default="data")
