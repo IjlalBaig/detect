@@ -3,20 +3,14 @@ import random
 
 # Torch
 import torch
-import torch.nn as nn
 import math
-import kornia
 import os
 from torch.utils.data import Subset, DataLoader
 from torchvision.utils import make_grid
 import torch.nn.functional as F
-from src.test import Tower, detectnet
-from torch.distributions import Normal, Beta
-from torch.optim.lr_scheduler import StepLR
-from pytorch_msssim import SSIM, MS_SSIM
-from src.utils import Annealer
+from src.model import detectnet
+from torch.distributions import Beta
 
-from src.kornia import warp_frame_depth
 from tensorboardX import SummaryWriter
 
 # Ignite
@@ -25,10 +19,7 @@ from ignite.engine import Engine, Events
 from ignite.utils import convert_tensor
 from ignite.metrics import RunningAverage, EpochMetric
 
-
-from src.test_model import Net
-from src.googlenet import GoogLeNet
-from src.components import TransformationLoss, InductiveBiasLoss, PoseTransformSampler
+from src.components import PoseTransformSampler
 from src.dataset import EnvironmentDataset
 from src.model_checkpoint import ModelCheckpoint
 from src.metrics import EpochAverage, EpochMax

@@ -184,10 +184,6 @@ def create_point_cloud_old(depth, img, scaling_factor=1, focal_length=0.03):
     z_pos = - torch.arange(-c_z, c_z + 1, device=dev).view(-1, 1).repeat(B, C, 1, W) * y_pos / f_z
     x_pos = torch.arange(-c_x, c_x + 1, device=dev).repeat(B, C, H, 1) * y_pos / f_x
     point = torch.cat([x_pos, y_pos, z_pos], dim=1).permute(0, 2, 3, 1)
-    # point = geo.transform_points(point, torch.tensor([[0.5, 0, 0, 0, 1, 0, 1, 0, 1]]))
-    # r = img[:, 0, ...].unsqueeze(0)
-    # g = img[:, 1, ...].unsqueeze(0)
-    # b = img[:, 2, ...].unsqueeze(0)
 
     return torch.cat([x_pos, y_pos, z_pos], dim=1).permute(0, 2, 3, 1)
 

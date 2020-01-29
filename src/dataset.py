@@ -10,149 +10,164 @@ import transforms3d as t3d
 
 import src.utils as utils
 
+
 class EnvironmentDataset(Dataset):
-    def __init__(self, dpath, im_dims=(1024, 1024), im_mode="L", read_masks=False, standardize=False):
+    def __init__(self, dpath, im_dims=(1024, 1024), im_mode="L"):
         self._dpath = dpath
-        self._im_size = im_dims[:2]
+
+        self._im_dims = im_dims
         self._im_mode = im_mode
-        self._channels = sum(1 for c in im_mode if not c.islower())
-        self._read_masks = read_masks
-        self._data_frames = []
-        self._load_data()
+        self._n_channels = sum(1 for c in im_mode if not c.islower())
+        self._intrinsics = self._compute_intrinsics()
 
-        self.pose_mean = None
-        self.pose_std = None
-        self._im_mean = 0.  # 0.3578
-        self._im_std = 1.   # 0.1101
-        self.standardize_pose = standardize
-        if self.standardize_pose:
-            self.pose_mean = torch.tensor([1.6442e-03, -3.0740e-03,  1.5000e+00,  0.0000e+00,  1.0000e+00,
-                                           0.0000e+00,  1.0000e+00,  1.0021e-04, -4.3859e-02])
-            self.pose_std = torch.tensor([0.1551, 0.1554, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.7269, 0.6853])
-            self.pose_std[:3] *= 10
-            # self._compute_standardization()
+        self._dataframes = []
+        self._load_dataframes()
 
-    def _compute_standardization(self):
-        loader = torch.utils.data.DataLoader(self, batch_size=64, num_workers=0, shuffle=False)
-        data = torch.tensor([])
-        for data_chunk in loader:
-            if len(data) == 0:
-                data = data_chunk["pose"]
-            else:
-                data = torch.cat([data, data_chunk["pose"]], dim=0)
+    @staticmethod
+    def _filter_positions(positions, filters):
+        x_filters = filters[0]
+        y_filters = filters[1]
+        z_filters = filters[2]
 
-        self.pose_mean = data.mean(dim=0)
-        std = data.std(dim=0)
-        self.pose_std = std.where(std != 0., torch.ones_like(std)*10.)
-        print("pose_mean", self.pose_mean)
-        print("pose_std", self.pose_std)
+        filtered_positions = positions
+        for i, pos in enumerate(positions):
+            in_xrange = False
+            for filter_range in x_filters:
+                if filter_range[0] <= pos[0] <= filter_range[1]:
+                    in_xrange = True
+                    break
 
+            in_yrange = False
+            for filter_range in y_filters:
+                if filter_range[0] <= pos[1] <= filter_range[1]:
+                    in_yrange = True
+                    break
 
-    def _read_data_file(self, fpath):
-        data = utils.read_json(fpath)
-        data_frames = []
-        for sample in data:
+            in_zrange = False
+            for filter_range in z_filters:
+                if filter_range[0] <= pos[2] <= filter_range[1]:
+                    in_zrange = True
+                    break
+            if not (in_xrange and in_yrange and in_zrange):
+                filtered_positions[i] = None
 
-            position = sample.get("cam_position", [])
-            orient_quat = sample.get("cam_quaternion", [1., 0., 0., 0.])
+        return filtered_positions
+
+    @staticmethod
+    def _filter_orientations(orientations_quat, filters, ret="euler"):
+        x_filters = filters[0]
+        y_filters = filters[1]
+        z_filters = filters[2]
+
+        filtered_orientations = orientations_quat
+        for i, orient_quat in enumerate(orientations_quat):
             orient_euler = t3d.euler.quat2euler(orient_quat, axes="sxyz")
-            if (-pi / 36 < orient_euler[2] < pi / 36 or
-                    (-31 * pi / 36) > orient_euler[2] < -11 * pi / 12 or
-                    -13 * pi / 18 > orient_euler[2] > -14 * pi / 18):
-            # if abs(orient_euler[0]) > 0.01:
-                # print(orient_euler[0] * 180. / pi)
-                data_frame = None
+            in_xrange = False
+            for filter_range in x_filters:
+                if filter_range[0] <= orient_euler[0] <= filter_range[1]:
+                    in_xrange = True
+                    break
 
+            in_yrange = False
+            for filter_range in y_filters:
+                if filter_range[0] <= orient_euler[1] <= filter_range[1]:
+                    in_yrange = True
+                    break
+
+            in_zrange = False
+            for filter_range in z_filters:
+                if filter_range[0] <= orient_euler[2] <= filter_range[1]:
+                    in_zrange = True
+                    break
+
+            if in_xrange and in_yrange and in_zrange:
+                if ret == "euler":
+                    filtered_orientations[i] = orient_euler
+                elif ret == "sin_cos":
+                    filtered_orientations[i] = [sin(orient_euler[0]), cos(orient_euler[0]),
+                                                sin(orient_euler[1]), cos(orient_euler[1]),
+                                                sin(orient_euler[2]), cos(orient_euler[2])]
+                elif ret == "quaternion":
+                    pass
             else:
-                # print(orient_euler[0])
-                # print("in: ", orient_euler[0] * 180 / pi)
-                orientation = [sin(orient_euler[0]), cos(orient_euler[0]),
-                               sin(orient_euler[1]), cos(orient_euler[1]),
-                               sin(orient_euler[2]), cos(orient_euler[2])]
-                # convert to positive hemisphere
-                # if orientation[0] < 0:
-                #     orientation = [o*-1 for o in orientation]
-                pose = position + orientation
+                filtered_orientations[i] = None
 
-                im_path = os.path.join(os.path.dirname(fpath), sample.get("rgb_id", ""))
-                depth_path = os.path.join(os.path.dirname(fpath), sample.get("depth_id", ""))
-                mask_paths = []
-                if self._read_masks:
-                    for mask_id in sample.get("mask_ids", []):
-                        mask_paths.append(os.path.join(os.path.dirname(fpath), mask_id))
+        return filtered_orientations
 
-                # intrinsics
-                f = 30
-                sx = sy = 36
-                cx = (self._im_size[0] - 1.0) / 2
-                cy = (self._im_size[1] - 1.0) / 2
-                fx = self._im_size[0] * f / sx
-                fy = self._im_size[1] * f / sy
+    def _compute_intrinsics(self, f=30, sx=36, sy=36):
+        cx = (self._im_dims[0] - 1.0) / 2
+        cy = (self._im_dims[1] - 1.0) / 2
+        fx = self._im_dims[0] * f / sx
+        fy = self._im_dims[1] * f / sy
+        return [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]]
 
-                data_frame = {"im_path": im_path, "depth_path": depth_path,
-                              "mask_paths": mask_paths, "pose": pose,
-                              "intrinsics": [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]]}
+    def _load_session_data(self, fpath, pos_filters=([(-10, 10)], [(-10, 10)], [(-10, 10)]),
+                           orient_filters=([(-pi, pi)], [(-pi, pi)], [(-pi, pi)])):
+        metadata = utils.read_json(fpath)
 
-            if data_frame:
-                data_frames.append(data_frame)
+        dataframes = []
+        for sample in metadata:
+            positions = sample.get("positions", [])
+            orientations_quat = sample.get("orientations", [])
 
-        return data_frames
+            orientations_euler = self._filter_orientations(orientations_quat, filters=orient_filters, ret="sin_cos")
+            positions = self._filter_positions(positions, filters=pos_filters)
 
-    def _load_data(self):
-        data_paths = glob.glob(pathname=os.path.join(self._dpath, "**", "*.json"), recursive=True)
+            rgb_paths = [os.path.join(os.path.dirname(fpath), id_) for id_ in sample.get("rgb_ids", [])]
+            depth_paths = [os.path.join(os.path.dirname(fpath), id_) for id_ in sample.get("depth_ids", [])]
 
-        # Append file data
-        for data_path in data_paths:
-            self._data_frames += self._read_data_file(data_path)
+            valid_poses = []
+            valid_rgb_paths = []
+            valid_depth_paths = []
+            for i, pose in enumerate(zip(positions, orientations_euler)):
+                if pose[0] is None or pose[1] is None:
+                    continue
+                else:
+                    valid_poses.append([v for r in pose for v in r])
+                    valid_rgb_paths.append(rgb_paths[i])
+                    valid_depth_paths.append(depth_paths[i])
+
+            dataframe = {"rgb_paths": valid_rgb_paths, "depth_paths": valid_depth_paths,
+                         "poses": valid_poses, "intrinsics": self._intrinsics}
+            dataframes.append(dataframe)
+        return dataframes
+
+    def _load_dataframes(self):
+        metadata_fpaths = glob.glob(pathname=os.path.join(self._dpath, "**", "*session_data.json"), recursive=True)
+
+        # load file data
+        for fpath in metadata_fpaths:
+            self._dataframes += self._load_session_data(fpath)
 
     def __len__(self):
-        return len(self._data_frames)
+        return len(self._dataframes)
 
     def __getitem__(self, idx):
-        data_frame = self._data_frames[idx]
-        im_path = data_frame.get("im_path")
-        depth_path = data_frame.get("depth_path")
-        mask_paths = data_frame.get("mask_paths", [])
+        rgb_paths = self._dataframes[idx].get("rgb_paths")
+        depth_paths = self._dataframes[idx].get("depth_paths")
 
-        im = Image.open(im_path).convert(self._im_mode)
-        depth = Image.open(depth_path).convert("L")
-        masks = []
-        if self._read_masks:
-            for mask_path in mask_paths:
-                masks.append(Image.open(mask_path).convert("L"))
+        rgbs_xfd = []
+        depths_xfd = []
+        for rgb_path, depth_path in zip(rgb_paths, depth_paths):
+            rgb = Image.open(rgb_path).convert(self._im_mode)
+            depth = Image.open(depth_path).convert("L")
 
-        mean = [self._im_mean] * self._channels
-        std = [self._im_std] * self._channels
-        im_xfrmed = transforms.Compose([transforms.Resize(self._im_size),
-                                        transforms.ToTensor(),
-                                        transforms.Normalize(mean, std)])(im)
+            rgb_xfd = transforms.Compose([transforms.Resize(self._im_dims),
+                                          transforms.ToTensor(),
+                                          transforms.Normalize([0.] * self._n_channels,
+                                                               [1.] * self._n_channels)])(rgb)
+            depth_xfd = transforms.Compose([transforms.Resize(self._im_dims),
+                                            transforms.ToTensor(),
+                                            transforms.Normalize([0.], [1.])])(depth)
 
-        depth_xfrmed = transforms.Compose([transforms.Resize(self._im_size),
-                                           transforms.ToTensor(),
-                                           transforms.Normalize([0.0], [1.0])])(depth)
+            rgbs_xfd.append(rgb_xfd.unsqueeze(0))
+            depths_xfd.append(depth_xfd.unsqueeze(0))
 
-        masks_xfrmed = []
-        if self._read_masks:
-            for mask in masks:
-                mask_xfrmed = transforms.Compose([transforms.Resize(self._im_size),
-                                                  transforms.ToTensor(),
-                                                  transforms.Normalize([0.0], [1.0])])(mask)
-                masks_xfrmed.append(mask_xfrmed)
-                masks_xfrmed = torch.stack(masks_xfrmed, dim=1).squeeze(dim=0)
-        else:
-            masks_xfrmed = torch.tensor(masks_xfrmed, dtype=torch.float)
+        poses_xfd = torch.tensor(self._dataframes[idx].get("poses"), dtype=torch.float)
+        intx_xfd = torch.tensor(self._dataframes[idx].get("intrinsics"), dtype=torch.float)
 
-        if self.standardize_pose and all(s is not None for s in [self.pose_mean, self.pose_std]):
-            pose_mean = self.pose_mean
-            pose_std = self.pose_std
-        else:
-            pose_mean = torch.tensor([0., 0., 0., 0., 0., 0., 0., 0., 0.])
-            pose_std = torch.tensor([1., 1., 1., 1., 1., 1., 1., 1., 1.])
-        pose_xfrmed = (torch.tensor(data_frame.get("pose"), dtype=torch.float) - pose_mean) / pose_std
-        # pose_xfrmed = torch.tensor(data_frame.get("pose"), dtype=torch.float)
-        intrinsics_xformed = torch.tensor(data_frame.get("intrinsics"), dtype=torch.float)
-
-        sample = {"im": im_xfrmed, "depth": depth_xfrmed, "masks": masks_xfrmed,
-                  "pose": pose_xfrmed, "pose_mean": pose_mean, "pose_std": pose_std,
-                  "intrinsics": intrinsics_xformed}
+        sample = {"rgbs": torch.cat(rgbs_xfd),
+                  "depths": torch.cat(depths_xfd),
+                  "poses": poses_xfd,
+                  "intrinsics": intx_xfd}
         return sample
